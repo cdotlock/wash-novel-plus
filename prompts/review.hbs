@@ -1,0 +1,98 @@
+{{!-- Review Prompt - Quality assessment --}}
+{{#if (isCn)}}
+# 质量审核任务
+
+请对以下节点内容进行质量评估。
+
+## 节点类型
+{{nodeType}}
+
+## 节点内容
+{{nodeContent}}
+
+---
+
+## 评分维度（每项 1-5 分）
+
+1. **完整性** - 场景描写是否覆盖了规划中的关键冲突点
+2. **情感粘性** - 角色情绪起伏是否符合人设
+3. **逻辑自洽** - 是否违背全局记忆中的物理设定
+4. **抉择质量** - 玩家选项是否具备真实的戏剧冲突
+
+## 输出格式
+
+```json
+{
+"score": 4,
+"completeness": 4,
+"emotionalImpact": 5,
+"logicalConsistency": 4,
+"choiceQuality": 3,
+"issues": [
+"问题1：xxx",
+"问题2：xxx"
+],
+"suggestions": [
+"建议1：xxx",
+"建议2：xxx"
+]
+}
+```
+
+### 评分标准
+- **5分**：卓越，无可挑剔
+- **4分**：良好，瑕不掩瑜
+- **3分**：及格，需要打磨
+- **2分**：不足，明显问题
+- **1分**：糟糕，需要重写
+
+请直接输出 JSON。
+{{else}}
+# Quality Review Task
+
+Please evaluate the quality of the following node content.
+
+## Node Type
+{{nodeType}}
+
+## Node Content
+{{nodeContent}}
+
+---
+
+## Scoring Dimensions (1-5 each)
+
+1. **Completeness** - Does scene description cover key conflict points
+2. **Emotional Impact** - Does character emotion match their personality
+3. **Logical Consistency** - Any violations of established world rules
+4. **Choice Quality** - Do player options have real dramatic conflict
+
+## Output Format
+
+```json
+{
+"score": 4,
+"completeness": 4,
+"emotionalImpact": 5,
+"logicalConsistency": 4,
+"choiceQuality": 3,
+"issues": [
+"Issue 1: xxx",
+"Issue 2: xxx"
+],
+"suggestions": [
+"Suggestion 1: xxx",
+"Suggestion 2: xxx"
+]
+}
+```
+
+### Scoring Standards
+- **5**: Excellent, impeccable
+- **4**: Good, minor flaws
+- **3**: Acceptable, needs polish
+- **2**: Insufficient, clear problems
+- **1**: Poor, needs rewrite
+
+Please output JSON directly.
+{{/if}}

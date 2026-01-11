@@ -1,0 +1,84 @@
+{{!-- Memory Update Prompt --}}
+{{#if (isCn)}}
+# 记忆更新任务
+
+请根据最新生成的事件内容，更新全局记忆状态。
+
+## 当前记忆
+{{#if currentMemory}}
+{{currentMemory}}
+{{else}}
+*（无前序记忆）*
+{{/if}}
+
+## 新生成的事件内容
+{{newContent}}
+
+---
+
+## 更新要求
+
+请生成一份压缩后的状态快照（约 300-500 字），必须包含：
+
+1. **角色位置**：主角和关键配角当前所在位置
+2. **健康状态**：受伤、疲劳、精神状态等
+3. **核心道具**：当前持有的重要物品
+4. **关系变更**：与 NPC 的好感度或敌对关系变化
+5. **剧情进展**：已完成的关键事件、已揭示的秘密
+6. **悬念伏笔**：尚未解决的问题或线索
+
+### 格式示例
+```
+【位置】主角位于青云峰修炼室
+【状态】轻伤（左臂擦伤），灵力消耗 30%
+【道具】持有：断水剑、储物袋、青玉令牌
+【关系】
+- 李师兄：好感 +10（协助击退来敌）
+- 王长老：警惕（怀疑主角身份）
+【进展】完成宗门入门试炼，获得内门弟子资格
+【悬念】神秘黑袍人身份未明，青玉令牌用途不详
+```
+
+请直接输出记忆内容，不要添加解释。
+{{else}}
+# Memory Update Task
+
+Please update the global memory state based on the newly generated event content.
+
+## Current Memory
+{{#if currentMemory}}
+{{currentMemory}}
+{{else}}
+*(No prior memory)*
+{{/if}}
+
+## New Event Content
+{{newContent}}
+
+---
+
+## Update Requirements
+
+Please generate a compressed state snapshot (about 300-500 words), must include:
+
+1. **Character Locations**: Where protagonist and key characters are
+2. **Health Status**: Injuries, fatigue, mental state
+3. **Core Items**: Important items currently held
+4. **Relationship Changes**: Affinity or hostility changes with NPCs
+5. **Plot Progress**: Completed key events, revealed secrets
+6. **Suspense/Foreshadowing**: Unresolved issues or clues
+
+### Format Example
+```
+[Location] Protagonist at Green Cloud Peak training room
+[Status] Minor injury (left arm scrape), spiritual power 70%
+[Items] Holding: Broken Water Sword, Storage Bag, Jade Token
+[Relations]
+- Senior Li: Affinity +10 (helped repel enemies)
+- Elder Wang: Wary (suspects protagonist's identity)
+[Progress] Completed sect entrance trial, gained inner disciple status
+[Suspense] Mysterious black-robed figure identity unknown, jade token purpose unclear
+```
+
+Please output memory content directly without explanation.
+{{/if}}

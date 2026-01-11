@@ -1,0 +1,85 @@
+// Wash Novel 2.0 - Database Schema
+// Using PostgreSQL for production deployment
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+// Novel processing session
+model Session {
+  id        String   @id @default(cuid())
+  name      String
+  status    String   @default("uploading") // uploading | indexing | planning | confirmed | executing | completed
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Large data stored as JSONB for better query performance
+  chapters        Json    @default("{}")  // Record<number, Chapter>
+  chapterIndex    Json    @default("[]")  // ChapterIndex[]
+  planEvents      Json    @default("[]")  // EventPlan[]
+  planRationale   String  @default("")
+  planMode        String  @default("auto")
+  planConfirmed   Boolean @default(false)
+  nodes           Json    @default("{}")  // Record<number, Node>
+  globalMemory    String  @default("")
+  contentAnalysis Json    @default("{}")
+
+  // Relations
+  tasks Task[]
+
+  @@index([status])
+  @@index([createdAt])
+}
+
+// Background task (BullMQ job reference)
+model Task {
+  id        String   @id @default(cuid())
+  sessionId String
+  session   Session  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  type   String // indexing | planning | generating | reviewing
+  status String @default("pending") // pending | running | completed | failed | cancelled
+
+  progress Int @default(0)
+  total    Int @default(0)
+
+  result Json?   // JSON result data
+  error  String?
+
+  createdAt   DateTime  @default(now())
+  startedAt   DateTime?
+  completedAt DateTime?
+
+  // Context for task recovery (stores current position, model, etc.)
+  context Json @default("{}")
+
+  // BullMQ job reference
+  bullJobId String?
+
+  // Relations
+  events TaskEvent[]
+
+  @@index([sessionId])
+  @@index([status])
+  @@index([createdAt])
+}
+
+// Task event for SSE streaming and history
+model TaskEvent {
+  id     String @id @default(cuid())
+  taskId String
+  task   Task   @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  type    String // progress | log | error | complete | thought
+  message String
+  data    Json   @default("{}") // JSON additional data
+
+  createdAt DateTime @default(now())
+
+  @@index([taskId, createdAt])
+}

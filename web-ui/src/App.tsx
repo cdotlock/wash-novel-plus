@@ -1,0 +1,947 @@
+import { useState, useEffect, useCallback, useRef } from 'react';
+import './App.css';
+
+const API_BASE = 'http://localhost:3000';
+
+type AppStep = 'upload' | 'indexing' | 'planning' | 'executing';
+type PlanMode = 'auto' | 'split' | 'merge' | 'one_to_one';
+
+interface FileChapter {
+  filename: string;
+  number: number;
+  title: string;
+  content: string;
+}
+
+interface EventPlan {
+  id: number;
+  type: 'highlight' | 'normal';
+  startChapter: number;
+  endChapter: number;
+  description: string;
+}
+
+interface Node {
+  id: number;
+  type: string;
+  description: string;
+  status: 'pending' | 'generating' | 'completed' | 'error';
+  content?: string;
+  startChapter: number;
+  endChapter: number;
+  qualityScore?: number;
+  reviewIssues?: string[];
+}
+
+interface LogEntry {
+  type: string;
+  message: string;
+  timestamp: string;
+}
+
+interface ReviewResult {
+  nodeId: number;
+  score: number;
+  issues: string[];
+}
+
+// Helpers
+function extractChapterNumber(filename: string, index: number): number {
+  const match = filename.match(/第(\d+)章|(\d+)/);
+  return match ? parseInt(match[1] || match[2], 10) : index + 1;
+}
+
+function extractTitle(filename: string, number: number): string {
+  const title = filename.replace(/\.(txt|md)$/i, '');
+  return /第\d+章/.test(title) ? title : `第${number}章 ${title}`;
+}
+
+export default function App() {
+  // Core state
+  const [step, setStep] = useState<AppStep>('upload');
+  const [sessionId, setSessionId] = useState<string | null>(null);
+  const [sessionName, setSessionName] = useState('');
+  const [files, setFiles] = useState<FileChapter[]>([]);
+  const [autoSplit, setAutoSplit] = useState(false);
+  const [chapterCount, setChapterCount] = useState(0);
+  const [lang, setLang] = useState<'cn' | 'en'>('cn'); // Language state
+
+  // Planning state
+  const [planMode, setPlanMode] = useState<PlanMode>('auto');
+  const [targetNodeCount, setTargetNodeCount] = useState<number>(10);
+  const [planStats, setPlanStats] = useState<{
+    recommended?: number;
+    actual?: number;
+    user?: number | null;
+  } | null>(null);
+
+  // Effect to lock node count in 1:1 mode
+  useEffect(() => {
+    if (planMode === 'one_to_one' && chapterCount > 0) {
+      setTargetNodeCount(chapterCount);
+    }
+  }, [planMode, chapterCount]);
+  const [customInstructions, setCustomInstructions] = useState('');
+  const [events, setEvents] = useState<EventPlan[]>([]);
+  const [editingEvent, setEditingEvent] = useState<number | null>(null);
+
+  // Generation state
+  const [nodes, setNodes] = useState<Node[]>([]);
+  const [selectedNodeId, setSelectedNodeId] = useState<number | null>(null);
+  const [generatingNodeId, setGeneratingNodeId] = useState<number | null>(null);
+  const [isPaused, setIsPaused] = useState(false);
+
+  const [nextStepInstruction, setNextStepInstruction] = useState('');
+  const [autoReview, setAutoReview] = useState(true);
+  const [isBatchReviewing, setIsBatchReviewing] = useState(false);
+  const [isPlanning, setIsPlanning] = useState(false);
+
+  // UI state
+  const [logs, setLogs] = useState<LogEntry[]>([]);
+  const [thoughts, setThoughts] = useState<string[]>([]);
+  const [reviewResults, setReviewResults] = useState<ReviewResult[]>([]);
+  const [progress, setProgress] = useState(0);
+  const [progressMessage, setProgressMessage] = useState('');
+  const [taskId, setTaskId] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [dragOver, setDragOver] = useState(false);
+  const [initialized, setInitialized] = useState(false);
+
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const thoughtsRef = useRef<HTMLDivElement>(null);
+
+  // Logging
+  const addLog = useCallback((type: string, message: string) => {
+    setLogs(prev => [{
+      type, message,
+      timestamp: new Date().toLocaleTimeString()
+    }, ...prev].slice(0, 100));
+  }, []);
+
+  // Restore session on mount
+  useEffect(() => {
+    const saved = localStorage.getItem('wash_session');
+    if (saved) {
+      try {
+        const data = JSON.parse(saved);
+        if (data.sessionId && data.step !== 'upload') {
+          setSessionId(data.sessionId);
+          setSessionName(data.sessionName || '');
+          setStep(data.step);
+          setChapterCount(data.chapterCount || 0);
+          setEvents(data.events || []);
+          setNodes(data.nodes || []);
+          setPlanMode(data.planMode || 'auto');
+          setTargetNodeCount(data.targetNodeCount || 10);
+          console.log('Session restored:', data.sessionId);
+        }
+      } catch { }
+    }
+    setInitialized(true);
+
+    // Fetch system config
+    fetch(`${API_BASE}/api/config`)
+      .then(res => res.json())
+      .then(data => {
+        if (data.language) setLang(data.language);
+      })
+      .catch(() => { });
+  }, []);
+
+  // Save session
+  useEffect(() => {
+    if (!initialized || !sessionId) return;
+    localStorage.setItem('wash_session', JSON.stringify({
+      sessionId, sessionName, step, chapterCount,
+      events, nodes, planMode, targetNodeCount,
+      savedAt: new Date().toISOString()
+    }));
+  }, [initialized, sessionId, sessionName, step, chapterCount, events, nodes, planMode, targetNodeCount]);
+
+  // Helper: fetch latest plan from server
+  const fetchPlanFromServer = useCallback(async () => {
+    if (!sessionId) return;
+    try {
+      const planRes = await fetch(`${API_BASE}/api/sessions/${sessionId}/plan`);
+      const planData = await planRes.json();
+      if (planData.events?.length > 0) setEvents(planData.events);
+
+      const analysis = planData.analysis || {};
+      const recommended = analysis.targetNodeCount as number | undefined;
+      const actual = (analysis.lastPlanEventCount as number | undefined) || (planData.events?.length || 0);
+      const user = (analysis.lastPlanUserTarget as number | null | undefined) ?? null;
+
+      setPlanStats({ recommended, actual, user });
+
+      // 如果后端有推荐 targetNodeCount，就在 auto 且当前为 0 时同步到 UI；否则不覆盖用户输入
+      if (planMode === 'auto' && (!targetNodeCount || targetNodeCount === 0) && recommended) {
+        setTargetNodeCount(recommended);
+      }
+
+      setStep('planning');
+    } catch { }
+  }, [sessionId, planMode, targetNodeCount, setEvents, setPlanStats, setTargetNodeCount, setStep]);
+
+  // SSE subscription with thought stream
+  useEffect(() => {
+    if (!taskId) return;
+    const evtSource = new EventSource(`${API_BASE}/api/tasks/${taskId}/events`);
+
+    evtSource.onmessage = (e) => {
+      try {
+        const data = JSON.parse(e.data);
+
+        if (data.type === 'thought') {
+          // Real-time thought stream
+          setThoughts(prev => [...prev, data.message].slice(-20));
+          if (thoughtsRef.current) {
+            thoughtsRef.current.scrollTop = thoughtsRef.current.scrollHeight;
+          }
+        } else if (data.type === 'node_ready') {
+          // Node completed - can view immediately
+          const nodeId = data.data?.nodeId;
+          if (nodeId) {
+            setNodes(prev => prev.map(n =>
+              n.id === nodeId ? { ...n, status: 'completed', content: data.data?.content } : n
+            ));
+            setGeneratingNodeId(null);
+            addLog('complete', `节点 #${nodeId} 生成完成`);
+          }
+        } else if (data.type === 'node_start') {
+          setGeneratingNodeId(data.data?.nodeId);
+          // 不清除思考流，保留上一节点的思考记录
+        } else if (data.type === 'progress') {
+          setProgress(data.data?.progress || 0);
+          setProgressMessage(data.message);
+          addLog('progress', data.message);
+        } else if (data.type === 'log') {
+          addLog('log', data.message);
+          const nodeId = data.data?.nodeId as number | undefined;
+          const score = data.data?.score as number | undefined;
+          const issues = (data.data?.issues as string[] | undefined) ?? [];
+          if (nodeId && typeof score === 'number') {
+            // 更新对应节点的打分
+            setNodes(prev => prev.map(n =>
+              n.id === nodeId ? { ...n, qualityScore: score, reviewIssues: issues } : n
+            ));
+            // 右侧 Review 结果面板也同步这个节点
+            setReviewResults(prev => {
+              const others = prev.filter(r => r.nodeId !== nodeId);
+              return [{ nodeId, score, issues }, ...others].slice(0, 100);
+            });
+          }
+        } else if (data.type === 'reroll') {
+          addLog('reroll', data.message);
+        } else if (data.type === 'complete') {
+          addLog('complete', data.message);
+          setProgress(100);
+
+          // Capture review results when present
+          if (data.data?.reviews) {
+            const reviews = (data.data.reviews as any[]).map(r => ({
+              nodeId: r.nodeId,
+              score: r.score,
+              issues: r.issues ?? [],
+            }));
+            setReviewResults(reviews);
+          }
+
+          if (step === 'indexing') {
+            // 索引完成后自动进入规划阶段
+            setTaskId(null);
+            handleGeneratePlan();
+          } else if (step === 'planning') {
+            // 规划任务完成后，拉取最新规划结果
+            fetchPlanFromServer();
+            setTaskId(null);
+            setIsPlanning(false);
+          } else if (step === 'executing') {
+            // 生成 / 批量 review 结束
+            addLog('success', data.message);
+            setTaskId(null);
+            setIsBatchReviewing(false);
+          } else {
+            setTaskId(null);
+          }
+        } else if (data.type === 'error') {
+          // Surface worker errors clearly到前端，并停止当前任务监听
+          setError(data.message);
+          addLog('error', data.message);
+          setTaskId(null);
+          setLoading(false);
+        } else if (data.type === 'paused') {
+          setIsPaused(true);
+          addLog('log', '任务已暂停');
+        }
+      } catch { }
+    };
+
+    evtSource.onerror = () => evtSource.close();
+    return () => evtSource.close();
+  }, [taskId, step, addLog, fetchPlanFromServer]);
+
+  // File handling
+  const handleFileSelect = useCallback(async (selectedFiles: FileList | File[]) => {
+    const fileArray = Array.from(selectedFiles).filter(f =>
+      f.name.endsWith('.txt') || f.name.endsWith('.md')
+    );
+    if (fileArray.length === 0) {
+      setError('请选择 .txt 或 .md 格式的文件');
+      return;
+    }
+
+    const chapters = await Promise.all(
+      fileArray.map((file, idx) =>
+        new Promise<FileChapter>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = (e) => {
+            const content = e.target?.result as string || '';
+            const number = extractChapterNumber(file.name, idx);
+            resolve({ filename: file.name, number, title: extractTitle(file.name, number), content });
+          };
+          reader.onerror = reject;
+          reader.readAsText(file);
+        })
+      )
+    );
+    chapters.sort((a, b) => a.number - b.number);
+    setFiles(chapters);
+    setError(null);
+    if (!sessionName && chapters.length > 0) {
+      setSessionName(chapters[0].filename.replace(/\.(txt|md)$/i, '').replace(/第\d+章.*/, '').trim() || '新小说');
+    }
+  }, [sessionName]);
+
+  // Upload and index
+  const handleUpload = async () => {
+    if (files.length === 0) return;
+    setLoading(true);
+    setError(null);
+
+    try {
+      // Create session
+      const sessionRes = await fetch(`${API_BASE}/api/sessions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: sessionName || '新小说' }),
+      });
+      const sessionData = await sessionRes.json();
+      const newSessionId = sessionData.session.id;
+      setSessionId(newSessionId);
+
+      // Upload content
+      const content = autoSplit && files.length === 1
+        ? files[0].content
+        : files.map(f => `第${f.number}章 ${f.title.replace(/^第\d+章\s*/, '')}\n\n${f.content}`).join('\n\n');
+
+      const uploadRes = await fetch(`${API_BASE}/api/sessions/${newSessionId}/upload`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content }),
+      });
+      const uploadData = await uploadRes.json();
+      if (!uploadRes.ok) throw new Error(uploadData.error || '上传失败');
+
+      setChapterCount(uploadData.chapterCount);
+      setTargetNodeCount(Math.round(uploadData.chapterCount * 0.8));
+      addLog('upload', `上传成功: ${uploadData.chapterCount} 章`);
+
+      // Start indexing
+      setStep('indexing');
+      setProgress(0);
+      const indexRes = await fetch(`${API_BASE}/api/sessions/${newSessionId}/index`, { method: 'POST' });
+      const indexData = await indexRes.json();
+      setTaskId(indexData.taskId);
+    } catch (e: any) {
+      setError(e.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Generate plan with mode
+  const handleGeneratePlan = async () => {
+    if (!sessionId) return;
+    setLoading(true);
+    setIsPlanning(true);
+    setError(null);
+
+    try {
+      const res = await fetch(`${API_BASE}/api/sessions/${sessionId}/plan`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          mode: planMode,
+          // 让后端/模型先给出推荐节点数；仅当用户在 UI 修改时再发具体值
+          targetNodeCount: planMode === 'auto' && targetNodeCount === 0 ? undefined : targetNodeCount,
+          customInstructions,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || '规划失败');
+      }
+      // 进入规划步骤，等待 SSE 通知完成后再拉取结果
+      setStep('planning');
+      setPlanStats(null);
+      setEvents([]);
+      setTaskId(data.taskId);
+      addLog('plan', `启动规划任务: ${data.taskId}`);
+    } catch (e: any) {
+      setError(e.message);
+      setIsPlanning(false);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Re-roll plan
+  const handleRerollPlan = () => {
+    handleGeneratePlan();
+  };
+
+  // Edit event
+  const handleUpdateEvent = (id: number, field: keyof EventPlan, value: any) => {
+    setEvents(prev => prev.map(e => e.id === id ? { ...e, [field]: value } : e));
+  };
+
+  // Delete event
+  const handleDeleteEvent = (id: number) => {
+    if (confirm('确定删除此事件？')) {
+      setEvents(prev => prev.filter(e => e.id !== id));
+    }
+  };
+
+  // Confirm and generate
+  const handleConfirmAndGenerate = async () => {
+    if (!sessionId) return;
+    setLoading(true);
+
+    try {
+      await fetch(`${API_BASE}/api/sessions/${sessionId}/plan`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ events, confirmed: true }),
+      });
+
+      // Initialize nodes from events
+      setNodes(events.map(e => ({
+        id: e.id,
+        type: e.type,
+        description: e.description,
+        status: 'pending',
+        startChapter: e.startChapter,
+        endChapter: e.endChapter,
+      })));
+
+      setStep('executing');
+      setProgress(0);
+      setThoughts([]);
+
+      const res = await fetch(`${API_BASE}/api/sessions/${sessionId}/generate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ autoReview })
+      });
+      const data = await res.json();
+      setTaskId(data.taskId);
+      addLog('generate', '开始生成节点...');
+    } catch (e: any) {
+      setError(e.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Pause generation
+  const handlePause = async () => {
+    if (!sessionId) return;
+    await fetch(`${API_BASE}/api/sessions/${sessionId}/pause`, { method: 'POST' });
+    setIsPaused(true);
+  };
+
+  // Resume generation
+  const handleResume = async () => {
+    if (!sessionId) return;
+    await fetch(`${API_BASE}/api/sessions/${sessionId}/resume`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ instruction: nextStepInstruction }),
+    });
+    setIsPaused(false);
+    setNextStepInstruction('');
+  };
+
+  // Re-roll single node
+  const handleRerollNode = async (nodeId: number) => {
+    if (!sessionId) return;
+    setNodes(prev => prev.map(n => n.id === nodeId ? { ...n, status: 'generating', content: undefined } : n));
+    setGeneratingNodeId(nodeId);
+    setThoughts([]);
+
+    await fetch(`${API_BASE}/api/sessions/${sessionId}/nodes/${nodeId}/reroll`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ autoReview }),
+    });
+    addLog('reroll', `正在重新生成节点 #${nodeId}`);
+  };
+
+  // Restart
+  const handleRestart = () => {
+    if (confirm('确定要重新开始吗？当前进度将被清除。')) {
+      localStorage.removeItem('wash_session');
+      window.location.reload();
+    }
+  };
+
+  // Export to ZIP
+  const handleExport = () => {
+    if (!sessionId) return;
+    window.location.href = `${API_BASE}/api/sessions/${sessionId}/export`;
+  };
+
+  // Batch review (manual, when autoReview is off)
+  const handleBatchReview = async () => {
+    if (!sessionId) return;
+    setIsBatchReviewing(true);
+    setError(null);
+    try {
+      const res = await fetch(`${API_BASE}/api/sessions/${sessionId}/review`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ autoFix: true }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || 'Review 任务创建失败');
+      }
+      setTaskId(data.taskId);
+      addLog('review', '开始批量 Review...');
+    } catch (e: any) {
+      setError(e.message);
+      setIsBatchReviewing(false);
+    }
+  };
+
+  const selectedNode = nodes.find(n => n.id === selectedNodeId);
+  const totalChars = files.reduce((sum, f) => sum + f.content.length, 0);
+  const completedNodes = nodes.filter(n => n.status === 'completed').length;
+
+  return (
+    <div className="app">
+      {/* Header */}
+      <header className="header">
+        <div className="header-left">
+          <h1>🌊 Wash 2.0</h1>
+          {sessionName && <span className="session-name">📖 {sessionName}</span>}
+        </div>
+        <div className="header-right">
+          {step === 'executing' && (
+            <button onClick={handleExport} className="btn btn-secondary" style={{ marginRight: '1rem' }}>📦 导出 ZIP</button>
+          )}
+          {step !== 'upload' && (
+            <button onClick={handleRestart} className="btn btn-ghost">
+              {lang === 'en' ? '🔄 New Task' : '🔄 新建任务'}
+            </button>
+          )}
+        </div>
+      </header>
+
+      {/* Step Navigation */}
+      {step !== 'upload' && (
+        <nav className="step-nav">
+          {['upload', 'indexing', 'planning', 'executing'].map((s, i) => {
+            const labels = ['上传', '索引', '规划', '工作台'];
+            const icons = ['📁', '🔍', '📋', '💻'];
+            const currentIdx = ['upload', 'indexing', 'planning', 'executing'].indexOf(step);
+            return (
+              <div key={s}
+                className={`step-item ${s === step ? 'active' : ''} ${i < currentIdx ? 'passed' : ''}`}
+                onClick={() => (i <= currentIdx || s === step) && setStep(s as AppStep)}
+                style={{ cursor: (i <= currentIdx || s === step) ? 'pointer' : 'default' }}>
+                <span>{icons[i]}</span>
+                <span>{lang === 'en' ? ['Upload', 'Index', 'Plan', 'Workbench'][i] : labels[i]}</span>
+              </div>
+            );
+          })}
+        </nav>
+      )}
+
+      {error && (
+        <div className="error-banner">
+          <span>❌ {error}</span>
+          <button onClick={() => setError(null)}>✕</button>
+        </div>
+      )}
+
+      <main className="main">
+        {/* UPLOAD */}
+        {step === 'upload' && (
+          <div className="upload-view">
+            <div className="upload-header">
+              <h2>📁 上传小说</h2>
+              <p>上传小说章节文件，支持多选或拖拽</p>
+            </div>
+
+            <input
+              type="text"
+              placeholder="小说名称"
+              value={sessionName}
+              onChange={(e) => setSessionName(e.target.value)}
+              className="input"
+            />
+
+            <div className="file-input-row">
+              <input ref={fileInputRef} type="file" accept=".txt,.md" multiple style={{ display: 'none' }}
+                onChange={(e) => e.target.files && handleFileSelect(e.target.files)} />
+              <button onClick={() => fileInputRef.current?.click()} className="btn btn-primary">📁 选择文件</button>
+              {files.length > 0 && <button onClick={() => setFiles([])} className="btn btn-ghost">清空</button>}
+              <span className="file-hint">支持多选 .txt/.md</span>
+            </div>
+
+            <div className={`file-drop-zone ${dragOver ? 'dragover' : ''}`}
+              onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+              onDragLeave={() => setDragOver(false)}
+              onDrop={(e) => { e.preventDefault(); setDragOver(false); handleFileSelect(e.dataTransfer.files); }}>
+              {files.length === 0 ? (
+                <>
+                  <span className="upload-icon">📤</span>
+                  <p>拖放文件到此处</p>
+                </>
+              ) : (
+                <div className="file-list">
+                  <div className="file-list-header">已选择 {files.length} 个文件 ({totalChars.toLocaleString()} 字)</div>
+                  <div className="file-list-items">
+                    {files.slice(0, 10).map((f, i) => (
+                      <div key={i} className="file-list-item">
+                        <span>#{f.number}</span>
+                        <span className="file-title">{f.title}</span>
+                        <span>{f.content.length.toLocaleString()} 字</span>
+                      </div>
+                    ))}
+                    {files.length > 10 && <div className="file-list-more">... 还有 {files.length - 10} 个文件</div>}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="auto-split-toggle">
+              <div>
+                <h4>自动拆分章节</h4>
+                <p>{autoSplit ? '上传单个文件时自动识别章节' : '每个文件作为一章'}</p>
+              </div>
+              <button onClick={() => setAutoSplit(!autoSplit)} className={`toggle-btn ${autoSplit ? 'active' : ''}`}>
+                <span className="toggle-knob" />
+              </button>
+            </div>
+
+            <button onClick={handleUpload} disabled={loading || files.length === 0} className="btn btn-primary btn-lg">
+              {loading ? '处理中...' : `🚀 开始处理 (${files.length} 个文件)`}
+            </button>
+          </div>
+        )}
+
+        {/* INDEXING */}
+        {step === 'indexing' && (
+          <div className="processing-view">
+            <h2>🔍 正在索引...</h2>
+            <p>分析 {chapterCount} 个章节</p>
+            <div className="progress-bar"><div className="progress-fill" style={{ width: `${progress}%` }} /></div>
+            <p className="progress-text">{progress}% - {progressMessage}</p>
+            <div className="log-console">
+              {logs.slice(0, 8).map((l, i) => (
+                <div key={i} className={`log-entry log-${l.type}`}>
+                  <span className="log-time">[{l.timestamp}]</span> {l.message}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* PLANNING */}
+        {step === 'planning' && (
+          <div className="planning-view">
+            <div className="planning-header">
+              <h2>📋 事件规划</h2>
+              <p>
+                共 {events.length} 个事件节点
+                {isPlanning && <span style={{ marginLeft: '0.5rem', fontSize: '0.85rem', color: 'var(--gray-500)' }}>（正在规划中...）</span>}
+              </p>
+              {planStats && (
+                <p style={{ fontSize: '0.85rem', color: 'var(--gray-600)' }}>
+                  模型推荐: {planStats.recommended ?? '—'}
+                  <span style={{ margin: '0 0.5rem' }}>|</span>
+                  实际生成: {planStats.actual ?? '—'}
+                  <span style={{ margin: '0 0.5rem' }}>|</span>
+                  你指定: {planStats.user ?? '—'}
+                </p>
+              )}
+            </div>
+
+            {/* Mode Selection */}
+            <div className="plan-controls">
+              <div className="mode-selector">
+                <label>规划模式</label>
+                <div className="mode-tabs">
+                  {(['auto', 'split', 'merge', 'one_to_one'] as PlanMode[]).map(m => (
+                    <button key={m} className={`mode-tab ${planMode === m ? 'active' : ''}`}
+                      onClick={() => setPlanMode(m)}>
+                      {m === 'auto' ? '🤖 自动' : m === 'split' ? '✂️ 拆分' : m === 'merge' ? '🔗 合并' : '1:1 映射'}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="node-count-control">
+                <label>目标节点数</label>
+                <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+                  <input type="number" min={1} max={chapterCount * 3 || 999}
+                    disabled={planMode === 'one_to_one'}
+                    value={targetNodeCount || ''}
+                    onChange={(e) => setTargetNodeCount(Number(e.target.value) || 0)}
+                    style={{ width: '80px', padding: '0.25rem' }} />
+                  {planMode === 'auto' && (
+                    <span style={{ fontSize: '0.8rem', color: 'var(--gray-500)' }}>
+                      （留空或 0 表示使用系统推荐值）
+                    </span>
+                  )}
+                </div>
+              </div>
+
+              <div className="instructions-control">
+                <label>{lang === 'en' ? 'Custom Instructions' : '自定义指令'}</label>
+                <textarea placeholder={lang === 'en' ? 'Add extra instructions...' : '添加额外的规划指令...'}
+                  value={customInstructions} onChange={(e) => setCustomInstructions(e.target.value)}
+                  className="textarea compact" rows={1} style={{ minHeight: '40px', fontSize: '0.9rem' }} />
+              </div>
+
+              <button onClick={handleRerollPlan} disabled={loading || isPlanning} className="btn btn-ghost">
+                🎲 重新规划
+              </button>
+            </div>
+
+            {/* Events List */}
+            <div className="events-list">
+              {events.map((event) => (
+                <div key={event.id} className={`event-card ${event.type} ${editingEvent === event.id ? 'editing' : ''}`}>
+                  <div className="event-header">
+                    <span className="event-id">#{event.id}</span>
+                    <span className={`event-type ${event.type}`}>
+                      {event.type === 'highlight' ? '🌟 高光' : '📄 日常'}
+                    </span>
+                    <span className="event-range">第{event.startChapter}-{event.endChapter}章</span>
+                    <div className="event-actions">
+                      <button onClick={() => setEditingEvent(editingEvent === event.id ? null : event.id)}>✏️</button>
+                      <button onClick={() => handleDeleteEvent(event.id)}>🗑️</button>
+                    </div>
+                  </div>
+
+                  {editingEvent === event.id ? (
+                    <div className="event-edit">
+                      <select value={event.type} onChange={(e) => handleUpdateEvent(event.id, 'type', e.target.value)}>
+                        <option value="highlight">高光</option>
+                        <option value="normal">日常</option>
+                      </select>
+                      <input type="number" value={event.startChapter} min={1}
+                        onChange={(e) => handleUpdateEvent(event.id, 'startChapter', Number(e.target.value))} />
+                      <span>-</span>
+                      <input type="number" value={event.endChapter}
+                        onChange={(e) => handleUpdateEvent(event.id, 'endChapter', Number(e.target.value))} />
+                      <textarea value={event.description}
+                        onChange={(e) => handleUpdateEvent(event.id, 'description', e.target.value)} />
+                    </div>
+                  ) : (
+                    <p className="event-desc">{event.description}</p>
+                  )}
+                </div>
+              ))}
+            </div>
+
+            <div className="planning-actions">
+              <div style={{ marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                <input type="checkbox" id="autoReview" checked={autoReview} onChange={(e) => setAutoReview(e.target.checked)} />
+                <label htmlFor="autoReview">启用自动审查 & 修正 (Auto-Review & Re-roll)</label>
+              </div>
+              <button onClick={handleConfirmAndGenerate} className="btn btn-primary btn-lg" disabled={loading || events.length === 0}>
+                ✅ 确认并开始生成
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* AGENT IDE (Unified Executing View) */}
+        {step === 'executing' && (
+          <div className="ide-view" style={{ display: 'grid', gridTemplateColumns: '250px 1fr 300px', gap: '1rem', height: 'calc(100vh - 140px)', padding: '1rem' }}>
+
+            {/* Left: Node List */}
+            <div className="ide-sidebar" style={{ background: 'white', borderRadius: '0.5rem', border: '1px solid var(--gray-200)', overflowY: 'auto', display: 'flex', flexDirection: 'column' }}>
+              <div style={{ padding: '0.75rem', borderBottom: '1px solid var(--gray-200)', fontWeight: '600' }}>
+                节点列表 ({completedNodes}/{nodes.length})
+              </div>
+              <div className="node-list">
+                {nodes.map(node => (
+                  <div key={node.id}
+                    className={`exec-node ${node.status} ${selectedNodeId === node.id ? 'selected' : ''}`}
+                    onClick={() => setSelectedNodeId(node.id)}
+                    style={{ padding: '0.75rem', borderBottom: '1px solid var(--gray-100)', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '0.5rem', background: selectedNodeId === node.id ? '#eff6ff' : node.status === 'generating' ? '#fef3c7' : 'white' }}
+                  >
+                    <span style={{ fontSize: '0.8rem', color: 'var(--gray-500)' }}>#{node.id}</span>
+                    <span style={{ flex: 1, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', fontSize: '0.85rem' }}>
+                      {node.type === 'highlight' ? '🌟' : '📄'} {node.description.slice(0, 10)}
+                    </span>
+                    {typeof node.qualityScore === 'number' && (
+                      <span style={{ fontSize: '0.75rem', color: 'var(--gray-400)' }}>★{node.qualityScore}</span>
+                    )}
+                    <span>{node.status === 'completed' ? '✅' : node.status === 'generating' ? '⏳' : '○'}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* Center: Editor */}
+            <div className="ide-editor" style={{ background: 'white', borderRadius: '0.5rem', border: '1px solid var(--gray-200)', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+              {selectedNode ? (
+                <>
+                  <div className="editor-toolbar" style={{ padding: '0.75rem', borderBottom: '1px solid var(--gray-200)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: '#f8fafc' }}>
+                    <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+                      <span style={{ fontWeight: 600 }}>节点 #{selectedNode.id}</span>
+                      <span className={`badge ${selectedNode.type}`} style={{ fontSize: '0.75rem', padding: '0.1rem 0.5rem', borderRadius: '99px', background: selectedNode.type === 'highlight' ? '#fef3c7' : '#f3f4f6' }}>
+                        {selectedNode.type === 'highlight' ? '高光' : '日常'}
+                      </span>
+                      {typeof selectedNode.qualityScore === 'number' && (
+                        <span style={{ fontSize: '0.8rem', color: 'var(--gray-500)' }}>
+                          评分：{selectedNode.qualityScore}/5
+                        </span>
+                      )}
+                      <span style={{ fontSize: '0.8rem', color: 'var(--gray-500)' }}>
+                        {selectedNode.status === 'completed' ? '已完成' : selectedNode.status === 'generating' ? '生成中...' : '待生成'}
+                      </span>
+                    </div>
+                    <div>
+                      {selectedNode.status === 'completed' && (
+                        <button onClick={() => handleRerollNode(selectedNode.id)} className="btn btn-ghost btn-sm">🎲 重生成</button>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="editor-content" style={{ flex: 1, position: 'relative' }}>
+                    {selectedNode.status === 'generating' ? (
+                      <div style={{ position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', color: 'var(--gray-400)' }}>
+                        <div className="generating-spinner" style={{ fontSize: '2rem', marginBottom: '1rem', animation: 'spin 1s linear infinite' }}>⏳</div>
+                        <p>AI 正在撰写中...</p>
+                        <p style={{ fontSize: '0.8rem', marginTop: '0.5rem' }}>请关注右侧思考流</p>
+                      </div>
+                    ) : selectedNode.status === 'completed' ? (
+                      <textarea
+                        value={selectedNode.content || ''}
+                        onChange={(e) => {
+                          const newContent = e.target.value;
+                          setNodes(prev => prev.map(n => n.id === selectedNode.id ? { ...n, content: newContent } : n));
+                        }}
+                        style={{ width: '100%', height: '100%', border: 'none', padding: '1rem', resize: 'none', fontSize: '1rem', lineHeight: '1.6', fontFamily: 'system-ui' }}
+                        placeholder="在此处编辑内容..."
+                      />
+                    ) : (
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: 'var(--gray-400)' }}>
+                        等待生成...
+                      </div>
+                    )}
+                  </div>
+                </>
+              ) : (
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: 'var(--gray-400)' }}>
+                  👈 请从左侧选择一个节点
+                </div>
+              )}
+            </div>
+
+            {/* Right: Thought Stream & Status */}
+            <div className="ide-status" style={{ background: 'white', borderRadius: '0.5rem', border: '1px solid var(--gray-200)', display: 'flex', flexDirection: 'column' }}>
+              <div style={{ padding: '0.75rem', borderBottom: '1px solid var(--gray-200)', fontWeight: '600', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <span>Agent 状态</span>
+                <span style={{ fontSize: '0.75rem', color: isPaused ? 'orange' : 'green' }}>
+                  {isPaused ? '⏸ 已暂停' : '▶ 运行中'}
+                </span>
+              </div>
+
+              <div style={{ padding: '0.5rem 0.75rem', borderBottom: '1px solid var(--gray-200)', display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.8rem', justifyContent: 'space-between' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                  <input type="checkbox" checked={autoReview} onChange={(e) => setAutoReview(e.target.checked)} id="ar-toggle" />
+                  <label htmlFor="ar-toggle">Auto-Review</label>
+                </div>
+                {!autoReview && (
+                  <button
+                    onClick={handleBatchReview}
+                    className="btn-sm"
+                    style={{ border: '1px solid var(--gray-300)', borderRadius: '4px', background: isBatchReviewing ? '#e5e7eb' : 'white', fontSize: '0.75rem' }}
+                    disabled={isBatchReviewing}
+                  >
+                    {isBatchReviewing ? 'Review 中...' : '全部 Review + 重roll'}
+                  </button>
+                )}
+              </div>
+
+              <div style={{ padding: '0.75rem', borderBottom: '1px solid var(--gray-200)' }}>
+                <div style={{ fontSize: '0.8rem', marginBottom: '0.25rem', display: 'flex', justifyContent: 'space-between' }}>
+                  <span>总进度</span>
+                  <span>{Math.round((completedNodes / nodes.length) * 100)}%</span>
+                </div>
+                <div className="progress-bar" style={{ marginBottom: 0 }}>
+                  <div className="progress-fill" style={{ width: `${(completedNodes / nodes.length) * 100}%` }} />
+                </div>
+              </div>
+
+              <div style={{ padding: '0.75rem', borderBottom: '1px solid var(--gray-200)', display: 'flex', gap: '0.5rem' }}>
+                {!isPaused ? (
+                  <button onClick={handlePause} className="btn-sm" style={{ flex: 1, border: '1px solid var(--gray-300)', borderRadius: '4px', background: 'white' }}>⏸ 暂停任务</button>
+                ) : (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', width: '100%' }}>
+                    <input type="text" placeholder="注入下一步指令..."
+                      value={nextStepInstruction} onChange={(e) => setNextStepInstruction(e.target.value)}
+                      style={{ padding: '0.25rem', border: '1px solid var(--gray-300)', borderRadius: '4px' }} />
+                    <button onClick={handleResume} className="btn-sm" style={{ background: 'var(--primary)', color: 'white', border: 'none', borderRadius: '4px', padding: '0.4rem' }}>▶ 继续执行</button>
+                  </div>
+                )}
+              </div>
+
+              <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+                <div style={{ padding: '0.5rem 0.75rem', background: '#f8fafc', borderBottom: '1px solid var(--gray-100)', fontSize: '0.75rem', fontWeight: 600, color: 'var(--gray-600)' }}>
+                  思考流 (Thought Stream)
+                </div>
+                <div className="thoughts" ref={thoughtsRef} style={{ flex: 1, padding: '0.75rem', overflowY: 'auto', background: '#1e293b', color: '#a78bfa', fontFamily: 'monospace', fontSize: '0.75rem' }}>
+                  {thoughts.length === 0 ? (
+                    <span style={{ color: 'var(--gray-500)' }}>等待思考...</span>
+                  ) : (
+                    thoughts.map((t, i) => <p key={i} style={{ marginBottom: '0.25rem' }}>{t}</p>)
+                  )}
+                </div>
+
+                {/* Review results list */}
+                <div style={{ padding: '0.5rem 0.75rem', background: '#f9fafb', borderTop: '1px solid var(--gray-200)', maxHeight: '180px', overflowY: 'auto' }}>
+                  <div style={{ fontSize: '0.75rem', fontWeight: 600, marginBottom: '0.25rem' }}>Review 结果</div>
+                  {reviewResults.length === 0 ? (
+                    <div style={{ fontSize: '0.75rem', color: 'var(--gray-500)' }}>暂无审稿结果</div>
+                  ) : (
+                    reviewResults.map(r => (
+                      <div key={r.nodeId} style={{ fontSize: '0.75rem', marginBottom: '0.25rem' }}>
+                        <span>节点 #{r.nodeId}：评分 {r.score}/5</span>
+                        {r.issues.length > 0 && (
+                          <div style={{ marginLeft: '0.5rem', color: 'var(--gray-500)' }}>
+                            问题：{r.issues.join('；')}
+                          </div>
+                        )}
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+            </div>
+
+          </div>
+        )}
+      </main>
+    </div>
+  );
+}
