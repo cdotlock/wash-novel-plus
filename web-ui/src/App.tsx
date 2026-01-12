@@ -189,6 +189,31 @@ export default function App() {
     } catch { }
   }, [sessionId, planMode, targetNodeCount, setEvents, setPlanStats, setTargetNodeCount, setStep]);
 
+  // Helper: sync latest nodes from server (for executing step or when page reloads)
+  const syncNodesFromServer = useCallback(async () => {
+    if (!sessionId) return;
+    try {
+      const res = await fetch(`${API_BASE}/api/sessions/${sessionId}/nodes`);
+      if (!res.ok) return;
+      const data = await res.json();
+      if (Array.isArray(data.nodes)) {
+        setNodes(data.nodes as Node[]);
+      }
+    } catch {
+      // best-effort sync; ignore errors
+    }
+  }, [sessionId]);
+
+  // On init + session restore, resync from server to avoid stale UI when SSE or dev HMR dropped
+  useEffect(() => {
+    if (!initialized || !sessionId) return;
+    if (step === 'planning') {
+      fetchPlanFromServer();
+    } else if (step === 'executing') {
+      syncNodesFromServer();
+    }
+  }, [initialized, sessionId, step, fetchPlanFromServer, syncNodesFromServer]);
+
   // SSE subscription with thought stream
   useEffect(() => {
     if (!taskId) return;

@@ -238,7 +238,11 @@ LANGFUSE_BASE_URL=https://cloud.langfuse.com  # 或你的自建实例
 在项目根目录执行：
 
 ```bash
+# 同步所有内置 Prompt（索引 / 规划 / 生成 / 记忆 / 旧版 Review）
 npx tsx scripts/upload_prompts.ts
+
+# 仅（重新）上传严格对齐评分 Schema 的 Review Prompt（wash-review-{lang}）
+npx tsx scripts/upload_review_prompts.ts
 ```
 
 成功时你会看到类似输出：
