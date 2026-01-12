@@ -34,8 +34,8 @@ export function getModel(type: ModelType): string {
 
 // Model router: Maps agent types to appropriate models
 export const MODEL_ROUTER = {
-    indexer: 'chat' as ModelType,     // Fast summarization
-    planner: 'reasoning' as ModelType, // Deep planning
+    indexer: 'chat' as ModelType,      // Fast summarization
+    planner: 'chat' as ModelType,      // Planning prefers stable JSON over long CoT
     writer: 'reasoning' as ModelType,  // Content generation
     refiner: 'reasoning' as ModelType, // Quality review
 } as const;

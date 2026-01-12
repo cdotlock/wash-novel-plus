@@ -6,12 +6,11 @@ import { Job } from 'bullmq';
 import { prisma } from '../lib/prisma.js';
 import { publishEvent, channels } from '../lib/redis.js';
 import { chatWithRetry, getModel, MODEL_ROUTER, TOKEN_LIMITS } from '../lib/llm.js';
-import { tryParseJson, parseJsonField, parseJsonLoose } from '../lib/json-utils.js';
-import { LLMPlanningResponseSchema } from '../schemas/llm-responses.js';
+import { parseJsonField, parseJsonLoose } from '../lib/json-utils.js';
 import { PlanningJobData } from '../lib/queue.js';
 import { ChapterIndex } from '../schemas/session.js';
 import { EventPlan } from '../schemas/plan.js';
-import { getPlanningPrompt, getPlanningAdjustPrompt } from '../lib/langfuse.js';
+import { getPlanningPrompt } from '../lib/langfuse.js';
 
 export async function processPlanningJob(job: Job<PlanningJobData>): Promise<void> {
     const { sessionId, taskId, mode, targetNodeCount, model } = job.data;
@@ -127,120 +126,34 @@ export async function processPlanningJob(job: Job<PlanningJobData>): Promise<voi
                 data: { progress: 50 },
             });
 
-            // Parse response with strict schema first
-            const strictResult = tryParseJson(response, LLMPlanningResponseSchema);
+            // Primary path: loose JSON parse + heuristic extraction
+            try {
+                const parsed = parseJsonLoose(response);
+                const extracted = extractPlanningEvents(parsed);
 
-            if (strictResult.success) {
-                const raw = strictResult.data as any;
-                const rawEvents = Array.isArray(raw) ? raw : raw.events;
-                events = normalizePlanningEvents(rawEvents, chapterIndex);
-                rationale = Array.isArray(raw) ? '' : raw.rationale ?? '';
-            } else {
-                // Second chance: loose JSON parsing + coercion
-                try {
-                    const raw = parseJsonLoose(response);
-                    const rawEvents = Array.isArray(raw)
-                        ? raw
-                        : Array.isArray((raw as any).events)
-                            ? (raw as any).events
-                            : [];
-
-                    if (!Array.isArray(rawEvents) || rawEvents.length === 0) {
-                        throw new Error('No events array found in planning response');
-                    }
-
-                    events = normalizePlanningEvents(rawEvents, chapterIndex);
-                    rationale = typeof (raw as any).rationale === 'string' ? (raw as any).rationale : '';
-                } catch (e) {
-                    console.error('Failed to parse planning response even with loose parser:', e);
-                    // Final fallback: single linear node to avoid total failure
-                    events = [{
-                        id: 1,
-                        type: 'normal',
-                        startChapter: firstChapter,
-                        endChapter: lastChapter,
-                        description: 'Complete story arc (fallback linear plan)',
-                        sceneCount: 1,
-                    }];
-                    rationale = 'Fallback plan due to parsing error';
+                if (!extracted || !Array.isArray(extracted.events)) {
+                    throw new Error('No events found in planning response');
                 }
+
+                events = normalizePlanningEvents(extracted.events, chapterIndex);
+                rationale = extracted.rationale ?? '';
+            } catch (primaryError) {
+                // Attempt more aggressive repair before giving up
+                const repaired = await repairPlanningResponse(response, resolvedModel);
+
+                if (!repaired || !Array.isArray(repaired.events) || repaired.events.length === 0) {
+                    console.error('Failed to parse planning response after repair attempts:', primaryError);
+                    throw new Error('Failed to parse planning response after repair attempts');
+                }
+
+                events = normalizePlanningEvents(repaired.events, chapterIndex);
+                rationale = repaired.rationale ?? '';
             }
 
-            // Post-process: merge consecutive highlights (only in AI modes)
-            events = mergeConsecutiveHighlights(events);
-
-            // Validate coverage and fill gaps
-            events = validateCoverage(events, firstChapter, lastChapter);
-
-            // 如果有目标节点数且当前数量不符，优先通过 LLM 做二次调整
-            if (Number.isFinite(effectiveTargetNodeCount) && (effectiveTargetNodeCount as number) > 0) {
-                const target = Math.max(1, Math.floor(effectiveTargetNodeCount as number));
-
-                if (events.length !== target) {
-                    try {
-                        const adjustPrompt = await getPlanningAdjustPrompt({
-                            mode: resolvedMode,
-                            chapterSummaries,
-                            currentEvents: events,
-                            targetNodeCount: target,
-                        });
-
-                        await publishEvent(channel, {
-                            type: 'thought',
-                            message: `[Planner] 调整规划以匹配目标节点数: 当前 ${events.length}, 目标 ${target}（通过 LLM 二次规划）`,
-                        });
-
-                        const adjustResponse = await chatWithRetry(adjustPrompt, {
-                            model: resolvedModel,
-                            maxTokens: TOKEN_LIMITS.planner,
-                        });
-
-                        const strictAdjust = tryParseJson(adjustResponse, LLMPlanningResponseSchema);
-
-                        if (strictAdjust.success) {
-                            const raw = strictAdjust.data as any;
-                            const rawEventsAdj = Array.isArray(raw) ? raw : raw.events;
-                            const adjusted = normalizePlanningEvents(rawEventsAdj, chapterIndex);
-                            if (adjusted.length > 0) {
-                                events = validateCoverage(mergeConsecutiveHighlights(adjusted), firstChapter, lastChapter);
-                            }
-                        } else {
-                            // 再尝试宽松解析
-                            try {
-                                const raw = parseJsonLoose(adjustResponse);
-                                const rawEventsAdj = Array.isArray(raw)
-                                    ? raw
-                                    : Array.isArray((raw as any).events)
-                                        ? (raw as any).events
-                                        : [];
-                                if (Array.isArray(rawEventsAdj) && rawEventsAdj.length > 0) {
-                                    const adjusted = normalizePlanningEvents(rawEventsAdj, chapterIndex);
-                                    events = validateCoverage(mergeConsecutiveHighlights(adjusted), firstChapter, lastChapter);
-                                }
-                            } catch (e) {
-                                console.error('Planning adjust parse failed, fallback to heuristic enforcement:', e);
-                            }
-                        }
-                    } catch (e) {
-                        console.error('Planning adjust LLM call failed, fallback to heuristic enforcement:', e);
-                    }
-
-                    // 若 LLM 调整后仍与目标差距较大，作为兜底再用一次本地启发式合并/拆分
-                    if (events.length !== target) {
-                        events = enforceTargetNodeCount(
-                            events,
-                            firstChapter,
-                            lastChapter,
-                            target,
-                        );
-                    }
-
-                    await publishEvent(channel, {
-                        type: 'thought',
-                        message: `Post-processed plan to ${events.length} nodes (target ≈ ${effectiveTargetNodeCount}).`,
-                    });
-                }
-            }
+            // NOTE: We intentionally no longer perform automatic post-processing
+            // like merging consecutive highlights or auto-filling chapter gaps.
+            // The LLM prompt is responsible for producing a topology that matches
+            // the user's expectations, and users can edit ranges directly in the UI.
         }
 
         // Merge simple stats into contentAnalysis so frontend can display them
@@ -303,6 +216,98 @@ export async function processPlanningJob(job: Job<PlanningJobData>): Promise<voi
         // Re-throw so BullMQ can apply its retry strategy
         throw error;
     }
+}
+
+// Repair planning response JSON using local heuristics and optional LLM-based repair
+async function repairPlanningResponse(
+    raw: string,
+    model: string,
+): Promise<{ events: any[]; rationale?: string } | null> {
+    // First try loose JSON parsing + heuristic extraction
+    try {
+        const loose = parseJsonLoose(raw);
+        const extracted = extractPlanningEvents(loose);
+        if (extracted && Array.isArray(extracted.events)) {
+            return extracted;
+        }
+    } catch (e) {
+        console.error('Loose planning JSON parse failed:', e);
+    }
+
+    // As a last resort, ask the LLM itself to repair the JSON
+    try {
+        const repairPrompt = [
+            {
+                role: 'system',
+                content:
+                    'You are a strict JSON repair engine. Given noisy text that is supposed to be a planning response, you must output ONLY valid JSON. No explanations, no markdown, just JSON.',
+            },
+            {
+                role: 'user',
+                content: `Repair the following LLM output into valid planning JSON and return ONLY the JSON object:\n\n${raw}`,
+            },
+        ] as any[];
+
+        const repairedText = await chatWithRetry(repairPrompt, {
+            model,
+            maxTokens: TOKEN_LIMITS.planner,
+        });
+
+        try {
+            const repairedParsed = parseJsonLoose(repairedText);
+            const extracted = extractPlanningEvents(repairedParsed);
+            if (extracted && Array.isArray(extracted.events)) {
+                return extracted;
+            }
+        } catch (e) {
+            console.error('LLM-based planning repair JSON parse failed:', e);
+        }
+    } catch (e) {
+        console.error('LLM-based planning repair failed:', e);
+    }
+
+    return null;
+}
+
+// Extract events / rationale from arbitrary parsed JSON
+function extractPlanningEvents(parsed: any): { events: any[]; rationale?: string } | null {
+    if (!parsed) return null;
+
+    // Case 1: root is array of events
+    if (Array.isArray(parsed)) {
+        return { events: parsed, rationale: '' };
+    }
+
+    // Case 2: root has events field
+    if ((parsed as any).events) {
+        const ev = (parsed as any).events;
+        if (Array.isArray(ev)) {
+            return { events: ev, rationale: (parsed as any).rationale };
+        }
+        // Single object -> wrap as array
+        if (typeof ev === 'object') {
+            return { events: [ev], rationale: (parsed as any).rationale };
+        }
+    }
+
+    // Case 3: some providers wrap payload in data/result
+    const container = (parsed as any).data ?? (parsed as any).result ?? null;
+    if (container) {
+        if (Array.isArray(container)) {
+            return { events: container, rationale: (container as any).rationale };
+        }
+        if ((container as any).events) {
+            const ev = (container as any).events;
+            if (Array.isArray(ev)) {
+                return { events: ev, rationale: (container as any).rationale };
+            }
+            if (typeof ev === 'object') {
+                return { events: [ev], rationale: (container as any).rationale };
+            }
+        }
+    }
+
+    return null;
 }
 
 // Normalize raw planning events from LLM into EventPlan objects
@@ -423,118 +428,4 @@ function validateCoverage(events: EventPlan[], startChapter: number, endChapter:
     return result;
 }
 
-/**
- * Adjust events to better match a target node count while keeping chapter coverage.
- *
- * - If we have too many events: iteratively merge the closest neighbouring events.
- * - If we have too few events: split the longest spans.
- *
- * This is intentionally simple and deterministic – the goal is to be stable,
- * not perfectly optimal.
- */
-function enforceTargetNodeCount(
-    events: EventPlan[],
-    startChapter: number,
-    endChapter: number,
-    target: number,
-): EventPlan[] {
-    const cleanedTarget = Math.max(1, Math.floor(target));
-    if (!Number.isFinite(cleanedTarget)) {
-        return events;
-    }
-
-    if (events.length === 0) {
-        return [{
-            id: 1,
-            type: 'normal',
-            startChapter,
-            endChapter,
-            description: 'Complete story arc',
-            sceneCount: 1,
-        }];
-    }
-
-    let result = [...events].sort((a, b) => a.startChapter - b.startChapter);
-
-    // Too many events: merge neighbouring events with the smallest combined span first
-    while (result.length > cleanedTarget && result.length > 1) {
-        let bestIndex = -1;
-        let bestSpan = Number.POSITIVE_INFINITY;
-
-        for (let i = 0; i < result.length - 1; i++) {
-            const a = result[i];
-            const b = result[i + 1];
-            const span = b.endChapter - a.startChapter + 1;
-            if (span < bestSpan) {
-                bestSpan = span;
-                bestIndex = i;
-            }
-        }
-
-        if (bestIndex === -1) break;
-
-        const a = result[bestIndex];
-        const b = result[bestIndex + 1];
-        const merged: EventPlan = {
-            id: a.id,
-            type: a.type === 'highlight' || b.type === 'highlight' ? 'highlight' : 'normal',
-            startChapter: a.startChapter,
-            endChapter: b.endChapter,
-            description: `${a.description} / ${b.description}`,
-            sceneCount: (a.sceneCount ?? 1) + (b.sceneCount ?? 1),
-        };
-
-        result.splice(bestIndex, 2, merged);
-    }
-
-    // Too few events: split the longest multi-chapter spans
-    while (result.length < cleanedTarget) {
-        let bestIndex = -1;
-        let bestLength = 0;
-
-        for (let i = 0; i < result.length; i++) {
-            const e = result[i];
-            const length = e.endChapter - e.startChapter + 1;
-            if (length > bestLength && length >= 2) {
-                bestLength = length;
-                bestIndex = i;
-            }
-        }
-
-        if (bestIndex === -1) {
-            // Nothing left that can be split safely
-            break;
-        }
-
-        const e = result[bestIndex];
-        const mid = Math.floor((e.startChapter + e.endChapter) / 2);
-        if (mid <= e.startChapter) break;
-
-        const first: EventPlan = {
-            ...e,
-            endChapter: mid,
-            description: `${e.description} (上半)`,
-        };
-
-        const second: EventPlan = {
-            ...e,
-            startChapter: mid + 1,
-            description: `${e.description} (下半)`,
-        };
-
-        result.splice(bestIndex, 1, first, second);
-    }
-
-    // Clamp to overall chapter bounds and drop invalid ranges
-    result = result
-        .map((e) => ({
-            ...e,
-            startChapter: Math.max(startChapter, e.startChapter),
-            endChapter: Math.min(endChapter, e.endChapter),
-        }))
-        .filter((e) => e.startChapter <= e.endChapter)
-        .sort((a, b) => a.startChapter - b.startChapter);
-
-    // Re-number IDs sequentially
-    return result.map((e, i) => ({ ...e, id: i + 1 }));
-}
+/** End of planner helpers */

@@ -96,6 +96,12 @@ export default function App() {
   const [isBatchReviewing, setIsBatchReviewing] = useState(false);
   const [isPlanning, setIsPlanning] = useState(false);
 
+  // Simple i18n helper
+  const tr = useCallback(
+    (cn: string, en: string) => (lang === 'en' ? en : cn),
+    [lang]
+  );
+
   // UI state
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [thoughts, setThoughts] = useState<string[]>([]);
@@ -287,7 +293,7 @@ export default function App() {
       f.name.endsWith('.txt') || f.name.endsWith('.md')
     );
     if (fileArray.length === 0) {
-      setError('请选择 .txt 或 .md 格式的文件');
+      setError(tr('请选择 .txt 或 .md 格式的文件', 'Please select .txt or .md files'));
       return;
     }
 
@@ -309,7 +315,12 @@ export default function App() {
     setFiles(chapters);
     setError(null);
     if (!sessionName && chapters.length > 0) {
-      setSessionName(chapters[0].filename.replace(/\.(txt|md)$/i, '').replace(/第\d+章.*/, '').trim() || '新小说');
+      setSessionName(
+        chapters[0].filename
+          .replace(/\.(txt|md)$/i, '')
+          .replace(/第\d+章.*/, '')
+          .trim() || (lang === 'en' ? 'New Novel' : '新小说')
+      );
     }
   }, [sessionName]);
 
@@ -341,11 +352,13 @@ export default function App() {
         body: JSON.stringify({ content }),
       });
       const uploadData = await uploadRes.json();
-      if (!uploadRes.ok) throw new Error(uploadData.error || '上传失败');
+      if (!uploadRes.ok) throw new Error(uploadData.error || tr('上传失败', 'Upload failed'));
 
       setChapterCount(uploadData.chapterCount);
       setTargetNodeCount(Math.round(uploadData.chapterCount * 0.8));
-      addLog('upload', `上传成功: ${uploadData.chapterCount} 章`);
+      addLog('upload', lang === 'en'
+        ? `Upload succeeded: ${uploadData.chapterCount} chapters`
+        : `上传成功: ${uploadData.chapterCount} 章`);
 
       // Start indexing
       setStep('indexing');
@@ -380,14 +393,16 @@ export default function App() {
       });
       const data = await res.json();
       if (!res.ok) {
-        throw new Error(data.error || '规划失败');
+        throw new Error(data.error || tr('规划失败', 'Planning failed'));
       }
       // 进入规划步骤，等待 SSE 通知完成后再拉取结果
       setStep('planning');
       setPlanStats(null);
       setEvents([]);
       setTaskId(data.taskId);
-      addLog('plan', `启动规划任务: ${data.taskId}`);
+      addLog('plan', lang === 'en'
+        ? `Planning task started: ${data.taskId}`
+        : `启动规划任务: ${data.taskId}`);
     } catch (e: any) {
       setError(e.message);
       setIsPlanning(false);
@@ -408,7 +423,7 @@ export default function App() {
 
   // Delete event
   const handleDeleteEvent = (id: number) => {
-    if (confirm('确定删除此事件？')) {
+    if (confirm(tr('确定删除此事件？', 'Delete this event?'))) {
       setEvents(prev => prev.filter(e => e.id !== id));
     }
   };
@@ -446,7 +461,7 @@ export default function App() {
       });
       const data = await res.json();
       setTaskId(data.taskId);
-      addLog('generate', '开始生成节点...');
+      addLog('generate', tr('开始生成节点...', 'Start generating nodes...'));
     } catch (e: any) {
       setError(e.message);
     } finally {
@@ -490,7 +505,7 @@ export default function App() {
 
   // Restart
   const handleRestart = () => {
-    if (confirm('确定要重新开始吗？当前进度将被清除。')) {
+    if (confirm(tr('确定要重新开始吗？当前进度将被清除。', 'Start over? Current progress will be cleared.'))) {
       localStorage.removeItem('wash_session');
       window.location.reload();
     }
@@ -518,7 +533,7 @@ export default function App() {
         throw new Error(data.error || 'Review 任务创建失败');
       }
       setTaskId(data.taskId);
-      addLog('review', '开始批量 Review...');
+      addLog('review', tr('开始批量 Review...', 'Start batch review...'));
     } catch (e: any) {
       setError(e.message);
       setIsBatchReviewing(false);
@@ -539,7 +554,9 @@ export default function App() {
         </div>
         <div className="header-right">
           {step === 'executing' && (
-            <button onClick={handleExport} className="btn btn-secondary" style={{ marginRight: '1rem' }}>📦 导出 ZIP</button>
+            <button onClick={handleExport} className="btn btn-secondary" style={{ marginRight: '1rem' }}>
+              {tr('📦 导出 ZIP', '📦 Export ZIP')}
+            </button>
           )}
           {step !== 'upload' && (
             <button onClick={handleRestart} className="btn btn-ghost">
@@ -572,6 +589,18 @@ export default function App() {
       {error && (
         <div className="error-banner">
           <span>❌ {error}</span>
+          {step === 'planning' && error.includes('Planning failed') && (
+            <button
+              onClick={() => {
+                setError(null);
+                handleGeneratePlan();
+              }}
+              className="btn btn-ghost"
+              style={{ marginLeft: '0.5rem' }}
+> 
+              {tr('🔁 重试规划', '🔁 Retry planning')}
+            </button>
+          )}
           <button onClick={() => setError(null)}>✕</button>
         </div>
       )}
@@ -581,13 +610,13 @@ export default function App() {
         {step === 'upload' && (
           <div className="upload-view">
             <div className="upload-header">
-              <h2>📁 上传小说</h2>
-              <p>上传小说章节文件，支持多选或拖拽</p>
+              <h2>{tr('📁 上传小说', '📁 Upload Novel')}</h2>
+              <p>{tr('上传小说章节文件，支持多选或拖拽', 'Upload chapter files, support multi-select or drag & drop')}</p>
             </div>
 
             <input
               type="text"
-              placeholder="小说名称"
+              placeholder={tr('小说名称', 'Novel name')}
               value={sessionName}
               onChange={(e) => setSessionName(e.target.value)}
               className="input"
@@ -596,9 +625,15 @@ export default function App() {
             <div className="file-input-row">
               <input ref={fileInputRef} type="file" accept=".txt,.md" multiple style={{ display: 'none' }}
                 onChange={(e) => e.target.files && handleFileSelect(e.target.files)} />
-              <button onClick={() => fileInputRef.current?.click()} className="btn btn-primary">📁 选择文件</button>
-              {files.length > 0 && <button onClick={() => setFiles([])} className="btn btn-ghost">清空</button>}
-              <span className="file-hint">支持多选 .txt/.md</span>
+              <button onClick={() => fileInputRef.current?.click()} className="btn btn-primary">
+                {tr('📁 选择文件', '📁 Choose files')}
+              </button>
+              {files.length > 0 && (
+                <button onClick={() => setFiles([])} className="btn btn-ghost">
+                  {tr('清空', 'Clear')}
+                </button>
+              )}
+              <span className="file-hint">{tr('支持多选 .txt/.md', 'Multi-select .txt/.md supported')}</span>
             </div>
 
             <div className={`file-drop-zone ${dragOver ? 'dragover' : ''}`}
@@ -608,20 +643,35 @@ export default function App() {
               {files.length === 0 ? (
                 <>
                   <span className="upload-icon">📤</span>
-                  <p>拖放文件到此处</p>
+                  <p>{tr('拖放文件到此处', 'Drop files here')}</p>
                 </>
               ) : (
                 <div className="file-list">
-                  <div className="file-list-header">已选择 {files.length} 个文件 ({totalChars.toLocaleString()} 字)</div>
+                  <div className="file-list-header">
+                    {tr(
+                      `已选择 ${files.length} 个文件 (${totalChars.toLocaleString()} 字)`,
+                      `Selected ${files.length} files (${totalChars.toLocaleString()} chars)`
+                    )}
+                  </div>
                   <div className="file-list-items">
                     {files.slice(0, 10).map((f, i) => (
                       <div key={i} className="file-list-item">
                         <span>#{f.number}</span>
                         <span className="file-title">{f.title}</span>
-                        <span>{f.content.length.toLocaleString()} 字</span>
+                        <span>{lang === 'en'
+                          ? `${f.content.length.toLocaleString()} chars`
+                          : `${f.content.length.toLocaleString()} 字`}
+                        </span>
                       </div>
                     ))}
-                    {files.length > 10 && <div className="file-list-more">... 还有 {files.length - 10} 个文件</div>}
+                    {files.length > 10 && (
+                      <div className="file-list-more">
+                        {tr(
+                          `... 还有 ${files.length - 10} 个文件`,
+                          `... plus ${files.length - 10} more files`
+                        )}
+                      </div>
+                    )}
                   </div>
                 </div>
               )}
@@ -629,8 +679,12 @@ export default function App() {
 
             <div className="auto-split-toggle">
               <div>
-                <h4>自动拆分章节</h4>
-                <p>{autoSplit ? '上传单个文件时自动识别章节' : '每个文件作为一章'}</p>
+                <h4>{tr('自动拆分章节', 'Auto split chapters')}</h4>
+                <p>
+                  {autoSplit
+                    ? tr('上传单个文件时自动识别章节', 'When uploading a single file, auto-detect chapters')
+                    : tr('每个文件作为一章', 'Each file is treated as one chapter')}
+                </p>
               </div>
               <button onClick={() => setAutoSplit(!autoSplit)} className={`toggle-btn ${autoSplit ? 'active' : ''}`}>
                 <span className="toggle-knob" />
@@ -638,7 +692,9 @@ export default function App() {
             </div>
 
             <button onClick={handleUpload} disabled={loading || files.length === 0} className="btn btn-primary btn-lg">
-              {loading ? '处理中...' : `🚀 开始处理 (${files.length} 个文件)`}
+              {loading
+                ? tr('处理中...', 'Processing...')
+                : tr(`🚀 开始处理 (${files.length} 个文件)`, `🚀 Start processing (${files.length} files)`)}
             </button>
           </div>
         )}
@@ -646,8 +702,8 @@ export default function App() {
         {/* INDEXING */}
         {step === 'indexing' && (
           <div className="processing-view">
-            <h2>🔍 正在索引...</h2>
-            <p>分析 {chapterCount} 个章节</p>
+            <h2>{tr('🔍 正在索引...', '🔍 Indexing...')}</h2>
+            <p>{tr(`分析 ${chapterCount} 个章节`, `Analyzing ${chapterCount} chapters`)}</p>
             <div className="progress-bar"><div className="progress-fill" style={{ width: `${progress}%` }} /></div>
             <p className="progress-text">{progress}% - {progressMessage}</p>
             <div className="log-console">
@@ -664,18 +720,25 @@ export default function App() {
         {step === 'planning' && (
           <div className="planning-view">
             <div className="planning-header">
-              <h2>📋 事件规划</h2>
+              <h2>{tr('📋 事件规划', '📋 Event Planning')}</h2>
               <p>
-                共 {events.length} 个事件节点
-                {isPlanning && <span style={{ marginLeft: '0.5rem', fontSize: '0.85rem', color: 'var(--gray-500)' }}>（正在规划中...）</span>}
+                {tr(
+                  `共 ${events.length} 个事件节点`,
+                  `${events.length} event nodes`
+                )}
+                {isPlanning && (
+                  <span style={{ marginLeft: '0.5rem', fontSize: '0.85rem', color: 'var(--gray-500)' }}>
+                    {tr('（正在规划中...）', '(planning...)')}
+                  </span>
+                )}
               </p>
               {planStats && (
                 <p style={{ fontSize: '0.85rem', color: 'var(--gray-600)' }}>
-                  模型推荐: {planStats.recommended ?? '—'}
+                  {tr('模型推荐', 'Model recommended')}: {planStats.recommended ?? '—'}
                   <span style={{ margin: '0 0.5rem' }}>|</span>
-                  实际生成: {planStats.actual ?? '—'}
+                  {tr('实际生成', 'Actual')}: {planStats.actual ?? '—'}
                   <span style={{ margin: '0 0.5rem' }}>|</span>
-                  你指定: {planStats.user ?? '—'}
+                  {tr('你指定', 'Your target')}: {planStats.user ?? '—'}
                 </p>
               )}
             </div>
@@ -683,19 +746,25 @@ export default function App() {
             {/* Mode Selection */}
             <div className="plan-controls">
               <div className="mode-selector">
-                <label>规划模式</label>
+                <label>{tr('规划模式', 'Planning mode')}</label>
                 <div className="mode-tabs">
                   {(['auto', 'split', 'merge', 'one_to_one'] as PlanMode[]).map(m => (
                     <button key={m} className={`mode-tab ${planMode === m ? 'active' : ''}`}
                       onClick={() => setPlanMode(m)}>
-                      {m === 'auto' ? '🤖 自动' : m === 'split' ? '✂️ 拆分' : m === 'merge' ? '🔗 合并' : '1:1 映射'}
+                      {m === 'auto'
+                        ? tr('🤖 自动', '🤖 Auto')
+                        : m === 'split'
+                          ? tr('✂️ 拆分', '✂️ Split')
+                          : m === 'merge'
+                            ? tr('🔗 合并', '🔗 Merge')
+                            : tr('1:1 映射', '1:1 Mapping')}
                     </button>
                   ))}
                 </div>
               </div>
 
               <div className="node-count-control">
-                <label>目标节点数</label>
+                <label>{tr('目标节点数', 'Target node count')}</label>
                 <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
                   <input type="number" min={1} max={chapterCount * 3 || 999}
                     disabled={planMode === 'one_to_one'}
@@ -704,7 +773,7 @@ export default function App() {
                     style={{ width: '80px', padding: '0.25rem' }} />
                   {planMode === 'auto' && (
                     <span style={{ fontSize: '0.8rem', color: 'var(--gray-500)' }}>
-                      （留空或 0 表示使用系统推荐值）
+                      {tr('（留空或 0 表示使用系统推荐值）', '(empty or 0 = use system recommendation)')}
                     </span>
                   )}
                 </div>
@@ -718,7 +787,7 @@ export default function App() {
               </div>
 
               <button onClick={handleRerollPlan} disabled={loading || isPlanning} className="btn btn-ghost">
-                🎲 重新规划
+                {tr('🎲 重新规划', '🎲 Re-plan')}
               </button>
             </div>
 
@@ -729,9 +798,15 @@ export default function App() {
                   <div className="event-header">
                     <span className="event-id">#{event.id}</span>
                     <span className={`event-type ${event.type}`}>
-                      {event.type === 'highlight' ? '🌟 高光' : '📄 日常'}
+                      {event.type === 'highlight'
+                        ? tr('🌟 高光', '🌟 Highlight')
+                        : tr('📄 日常', '📄 Normal')}
                     </span>
-                    <span className="event-range">第{event.startChapter}-{event.endChapter}章</span>
+                    <span className="event-range">
+                      {lang === 'en'
+                        ? `Ch.${event.startChapter}-${event.endChapter}`
+                        : `第${event.startChapter}-${event.endChapter}章`}
+                    </span>
                     <div className="event-actions">
                       <button onClick={() => setEditingEvent(editingEvent === event.id ? null : event.id)}>✏️</button>
                       <button onClick={() => handleDeleteEvent(event.id)}>🗑️</button>
@@ -741,8 +816,8 @@ export default function App() {
                   {editingEvent === event.id ? (
                     <div className="event-edit">
                       <select value={event.type} onChange={(e) => handleUpdateEvent(event.id, 'type', e.target.value)}>
-                        <option value="highlight">高光</option>
-                        <option value="normal">日常</option>
+                        <option value="highlight">{tr('高光', 'Highlight')}</option>
+                        <option value="normal">{tr('日常', 'Normal')}</option>
                       </select>
                       <input type="number" value={event.startChapter} min={1}
                         onChange={(e) => handleUpdateEvent(event.id, 'startChapter', Number(e.target.value))} />
@@ -762,10 +837,14 @@ export default function App() {
             <div className="planning-actions">
               <div style={{ marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                 <input type="checkbox" id="autoReview" checked={autoReview} onChange={(e) => setAutoReview(e.target.checked)} />
-                <label htmlFor="autoReview">启用自动审查 & 修正 (Auto-Review & Re-roll)</label>
+                <label htmlFor="autoReview">
+                  {lang === 'en'
+                    ? 'Enable Auto-Review & Re-roll'
+                    : '启用自动审查 & 修正 (Auto-Review & Re-roll)'}
+                </label>
               </div>
               <button onClick={handleConfirmAndGenerate} className="btn btn-primary btn-lg" disabled={loading || events.length === 0}>
-                ✅ 确认并开始生成
+                {tr('✅ 确认并开始生成', '✅ Confirm and start generation')}
               </button>
             </div>
           </div>
@@ -778,7 +857,7 @@ export default function App() {
             {/* Left: Node List */}
             <div className="ide-sidebar" style={{ background: 'white', borderRadius: '0.5rem', border: '1px solid var(--gray-200)', overflowY: 'auto', display: 'flex', flexDirection: 'column' }}>
               <div style={{ padding: '0.75rem', borderBottom: '1px solid var(--gray-200)', fontWeight: '600' }}>
-                节点列表 ({completedNodes}/{nodes.length})
+                {tr('节点列表', 'Node list')} ({completedNodes}/{nodes.length})
               </div>
               <div className="node-list">
                 {nodes.map(node => (
@@ -806,22 +885,32 @@ export default function App() {
                 <>
                   <div className="editor-toolbar" style={{ padding: '0.75rem', borderBottom: '1px solid var(--gray-200)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: '#f8fafc' }}>
                     <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
-                      <span style={{ fontWeight: 600 }}>节点 #{selectedNode.id}</span>
+                      <span style={{ fontWeight: 600 }}>
+                        {tr('节点', 'Node')} #{selectedNode.id}
+                      </span>
                       <span className={`badge ${selectedNode.type}`} style={{ fontSize: '0.75rem', padding: '0.1rem 0.5rem', borderRadius: '99px', background: selectedNode.type === 'highlight' ? '#fef3c7' : '#f3f4f6' }}>
-                        {selectedNode.type === 'highlight' ? '高光' : '日常'}
+                        {selectedNode.type === 'highlight'
+                          ? tr('高光', 'Highlight')
+                          : tr('日常', 'Normal')}
                       </span>
                       {typeof selectedNode.qualityScore === 'number' && (
                         <span style={{ fontSize: '0.8rem', color: 'var(--gray-500)' }}>
-                          评分：{selectedNode.qualityScore}/5
+                          {tr('评分', 'Score')}: {selectedNode.qualityScore}/5
                         </span>
                       )}
                       <span style={{ fontSize: '0.8rem', color: 'var(--gray-500)' }}>
-                        {selectedNode.status === 'completed' ? '已完成' : selectedNode.status === 'generating' ? '生成中...' : '待生成'}
+                        {selectedNode.status === 'completed'
+                          ? tr('已完成', 'Completed')
+                          : selectedNode.status === 'generating'
+                            ? tr('生成中...', 'Generating...')
+                            : tr('待生成', 'Pending')}
                       </span>
                     </div>
                     <div>
                       {selectedNode.status === 'completed' && (
-                        <button onClick={() => handleRerollNode(selectedNode.id)} className="btn btn-ghost btn-sm">🎲 重生成</button>
+                        <button onClick={() => handleRerollNode(selectedNode.id)} className="btn btn-ghost btn-sm">
+                          {tr('🎲 重生成', '🎲 Regenerate')}
+                        </button>
                       )}
                     </div>
                   </div>
@@ -830,8 +919,10 @@ export default function App() {
                     {selectedNode.status === 'generating' ? (
                       <div style={{ position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', color: 'var(--gray-400)' }}>
                         <div className="generating-spinner" style={{ fontSize: '2rem', marginBottom: '1rem', animation: 'spin 1s linear infinite' }}>⏳</div>
-                        <p>AI 正在撰写中...</p>
-                        <p style={{ fontSize: '0.8rem', marginTop: '0.5rem' }}>请关注右侧思考流</p>
+                        <p>{tr('AI 正在撰写中...', 'AI is writing...')}</p>
+                        <p style={{ fontSize: '0.8rem', marginTop: '0.5rem' }}>
+                          {tr('请关注右侧思考流', 'Watch the thought stream on the right')}
+                        </p>
                       </div>
                     ) : selectedNode.status === 'completed' ? (
                       <textarea
@@ -841,18 +932,18 @@ export default function App() {
                           setNodes(prev => prev.map(n => n.id === selectedNode.id ? { ...n, content: newContent } : n));
                         }}
                         style={{ width: '100%', height: '100%', border: 'none', padding: '1rem', resize: 'none', fontSize: '1rem', lineHeight: '1.6', fontFamily: 'system-ui' }}
-                        placeholder="在此处编辑内容..."
+                        placeholder={tr('在此处编辑内容...', 'Edit content here...')}
                       />
                     ) : (
                       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: 'var(--gray-400)' }}>
-                        等待生成...
+                        {tr('等待生成...', 'Waiting for generation...')}
                       </div>
                     )}
                   </div>
                 </>
               ) : (
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: 'var(--gray-400)' }}>
-                  👈 请从左侧选择一个节点
+                  {tr('👈 请从左侧选择一个节点', '👈 Select a node from the left')}
                 </div>
               )}
             </div>
@@ -860,9 +951,11 @@ export default function App() {
             {/* Right: Thought Stream & Status */}
             <div className="ide-status" style={{ background: 'white', borderRadius: '0.5rem', border: '1px solid var(--gray-200)', display: 'flex', flexDirection: 'column' }}>
               <div style={{ padding: '0.75rem', borderBottom: '1px solid var(--gray-200)', fontWeight: '600', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <span>Agent 状态</span>
+                <span>{tr('Agent 状态', 'Agent Status')}</span>
                 <span style={{ fontSize: '0.75rem', color: isPaused ? 'orange' : 'green' }}>
-                  {isPaused ? '⏸ 已暂停' : '▶ 运行中'}
+                  {isPaused
+                    ? tr('⏸ 已暂停', '⏸ Paused')
+                    : tr('▶ 运行中', '▶ Running')}
                 </span>
               </div>
 
@@ -885,7 +978,7 @@ export default function App() {
 
               <div style={{ padding: '0.75rem', borderBottom: '1px solid var(--gray-200)' }}>
                 <div style={{ fontSize: '0.8rem', marginBottom: '0.25rem', display: 'flex', justifyContent: 'space-between' }}>
-                  <span>总进度</span>
+                  <span>{tr('总进度', 'Overall progress')}</span>
                   <span>{Math.round((completedNodes / nodes.length) * 100)}%</span>
                 </div>
                 <div className="progress-bar" style={{ marginBottom: 0 }}>
@@ -895,24 +988,34 @@ export default function App() {
 
               <div style={{ padding: '0.75rem', borderBottom: '1px solid var(--gray-200)', display: 'flex', gap: '0.5rem' }}>
                 {!isPaused ? (
-                  <button onClick={handlePause} className="btn-sm" style={{ flex: 1, border: '1px solid var(--gray-300)', borderRadius: '4px', background: 'white' }}>⏸ 暂停任务</button>
+                  <button onClick={handlePause} className="btn-sm" style={{ flex: 1, border: '1px solid var(--gray-300)', borderRadius: '4px', background: 'white' }}>
+                    {tr('⏸ 暂停任务', '⏸ Pause task')}
+                  </button>
                 ) : (
                   <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', width: '100%' }}>
-                    <input type="text" placeholder="注入下一步指令..."
+                    <input
+                      type="text"
+                      placeholder={tr('注入下一步指令...', 'Inject next-step instruction...')}
                       value={nextStepInstruction} onChange={(e) => setNextStepInstruction(e.target.value)}
                       style={{ padding: '0.25rem', border: '1px solid var(--gray-300)', borderRadius: '4px' }} />
-                    <button onClick={handleResume} className="btn-sm" style={{ background: 'var(--primary)', color: 'white', border: 'none', borderRadius: '4px', padding: '0.4rem' }}>▶ 继续执行</button>
+                    <button
+                      onClick={handleResume}
+                      className="btn-sm"
+                      style={{ background: 'var(--primary)', color: 'white', border: 'none', borderRadius: '4px', padding: '0.4rem' }}
+                    >
+                      {tr('▶ 继续执行', '▶ Resume')}
+                    </button>
                   </div>
                 )}
               </div>
 
               <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
                 <div style={{ padding: '0.5rem 0.75rem', background: '#f8fafc', borderBottom: '1px solid var(--gray-100)', fontSize: '0.75rem', fontWeight: 600, color: 'var(--gray-600)' }}>
-                  思考流 (Thought Stream)
+                  {lang === 'en' ? 'Thought Stream' : '思考流 (Thought Stream)'}
                 </div>
                 <div className="thoughts" ref={thoughtsRef} style={{ flex: 1, padding: '0.75rem', overflowY: 'auto', background: '#1e293b', color: '#a78bfa', fontFamily: 'monospace', fontSize: '0.75rem' }}>
                   {thoughts.length === 0 ? (
-                    <span style={{ color: 'var(--gray-500)' }}>等待思考...</span>
+                    <span style={{ color: 'var(--gray-500)' }}>{tr('等待思考...', 'Waiting for thoughts...')}</span>
                   ) : (
                     thoughts.map((t, i) => <p key={i} style={{ marginBottom: '0.25rem' }}>{t}</p>)
                   )}
@@ -920,16 +1023,22 @@ export default function App() {
 
                 {/* Review results list */}
                 <div style={{ padding: '0.5rem 0.75rem', background: '#f9fafb', borderTop: '1px solid var(--gray-200)', maxHeight: '180px', overflowY: 'auto' }}>
-                  <div style={{ fontSize: '0.75rem', fontWeight: 600, marginBottom: '0.25rem' }}>Review 结果</div>
+                  <div style={{ fontSize: '0.75rem', fontWeight: 600, marginBottom: '0.25rem' }}>
+                    {tr('Review 结果', 'Review Results')}
+                  </div>
                   {reviewResults.length === 0 ? (
-                    <div style={{ fontSize: '0.75rem', color: 'var(--gray-500)' }}>暂无审稿结果</div>
+                    <div style={{ fontSize: '0.75rem', color: 'var(--gray-500)' }}>
+                      {tr('暂无审稿结果', 'No review results yet')}
+                    </div>
                   ) : (
                     reviewResults.map(r => (
                       <div key={r.nodeId} style={{ fontSize: '0.75rem', marginBottom: '0.25rem' }}>
-                        <span>节点 #{r.nodeId}：评分 {r.score}/5</span>
+                        <span>
+                          {tr('节点', 'Node')} #{r.nodeId}: {tr('评分', 'Score')} {r.score}/5
+                        </span>
                         {r.issues.length > 0 && (
                           <div style={{ marginLeft: '0.5rem', color: 'var(--gray-500)' }}>
-                            问题：{r.issues.join('；')}
+                            {tr('问题', 'Issues')}: {r.issues.join(lang === 'en' ? '; ' : '；')}
                           </div>
                         )}
                       </div>
