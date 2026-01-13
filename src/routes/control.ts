@@ -123,17 +123,26 @@ export async function controlRoutes(app: FastifyInstance): Promise<void> {
                 data: { nodes },
             });
 
-            // Find latest generating task for this session to reuse taskId
-            const existingTask = await prisma.task.findFirst({
+            // Find or create generating task for this session
+            let existingTask = await prisma.task.findFirst({
                 where: { sessionId: id, type: 'generating' },
                 orderBy: { createdAt: 'desc' },
             });
 
             if (!existingTask) {
-                return reply.status(400).send({ error: 'No generating task found for this session' });
+                // Create a new task for reroll if none exists
+                existingTask = await prisma.task.create({
+                    data: {
+                        sessionId: id,
+                        type: 'generating',
+                        status: 'pending',
+                        total: 1,
+                        progress: 0,
+                    },
+                });
             }
 
-            // Add reroll job to generating queue, reusing existing taskId
+            // Add reroll job to generating queue
             await queues.generating.add(QUEUE_NAMES.GENERATING, {
                 sessionId: id,
                 taskId: existingTask.id,
@@ -142,7 +151,7 @@ export async function controlRoutes(app: FastifyInstance): Promise<void> {
                 autoReview,
             });
 
-            // Optional: notify via session stream for immediate UI feedback
+            // Notify via session stream for immediate UI feedback
             await publishEvent(channels.sessionEvents(id), {
                 type: 'node_start',
                 message: `开始重新生成节点 #${nodeIdNum}`,

@@ -3,7 +3,7 @@ import './App.css';
 
 const API_BASE = 'http://localhost:3000';
 
-type AppStep = 'upload' | 'indexing' | 'planning' | 'executing';
+type AppStep = 'upload' | 'split-preview' | 'indexing' | 'planning' | 'executing';
 type PlanMode = 'auto' | 'split' | 'merge' | 'one_to_one';
 
 interface FileChapter {
@@ -45,6 +45,12 @@ interface ReviewResult {
   issues: string[];
 }
 
+interface SplitPreview {
+  chapters: Array<{ number: number; title: string; contentLength: number; contentPreview: string }>;
+  detectedLanguage: 'cn' | 'en' | 'mixed';
+  totalChars: number;
+}
+
 // Helpers
 function extractChapterNumber(filename: string, index: number): number {
   const match = filename.match(/第(\d+)章|(\d+)/);
@@ -64,6 +70,9 @@ export default function App() {
   const [files, setFiles] = useState<FileChapter[]>([]);
   const [autoSplit, setAutoSplit] = useState(false);
   const [chapterCount, setChapterCount] = useState(0);
+  const [splitPreview, setSplitPreview] = useState<SplitPreview | null>(null);
+  const [previewingChapterIdx, setPreviewingChapterIdx] = useState<number | null>(null);
+  const [deletedChapterIndices, setDeletedChapterIndices] = useState<Set<number>>(new Set());
   const [lang, setLang] = useState<'cn' | 'en'>('cn'); // Language state
 
   // Planning state
@@ -356,46 +365,97 @@ export default function App() {
     setError(null);
 
     try {
-      // Create session
-      const sessionRes = await fetch(`${API_BASE}/api/sessions`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: sessionName || '新小说' }),
-      });
-      const sessionData = await sessionRes.json();
-      const newSessionId = sessionData.session.id;
-      setSessionId(newSessionId);
+      // If auto-split is ON and single file, show preview first
+      if (autoSplit && files.length === 1) {
+        const content = files[0].content;
+        const previewRes = await fetch(`${API_BASE}/api/preview-split`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ content }),
+        });
+        const previewData = await previewRes.json();
+        if (!previewRes.ok) throw new Error(previewData.error || tr('预览失败', 'Preview failed'));
 
-      // Upload content
-      const content = autoSplit && files.length === 1
-        ? files[0].content
-        : files.map(f => `第${f.number}章 ${f.title.replace(/^第\d+章\s*/, '')}\n\n${f.content}`).join('\n\n');
+        setSplitPreview({
+          chapters: previewData.chapters,
+          detectedLanguage: previewData.detectedLanguage,
+          totalChars: previewData.totalChars,
+        });
+        setStep('split-preview');
+        setLoading(false);
+        return;
+      }
 
-      const uploadRes = await fetch(`${API_BASE}/api/sessions/${newSessionId}/upload`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ content }),
-      });
-      const uploadData = await uploadRes.json();
-      if (!uploadRes.ok) throw new Error(uploadData.error || tr('上传失败', 'Upload failed'));
-
-      setChapterCount(uploadData.chapterCount);
-      setTargetNodeCount(Math.round(uploadData.chapterCount * 0.8));
-      addLog('upload', lang === 'en'
-        ? `Upload succeeded: ${uploadData.chapterCount} chapters`
-        : `上传成功: ${uploadData.chapterCount} 章`);
-
-      // Start indexing
-      setStep('indexing');
-      setProgress(0);
-      const indexRes = await fetch(`${API_BASE}/api/sessions/${newSessionId}/index`, { method: 'POST' });
-      const indexData = await indexRes.json();
-      setTaskId(indexData.taskId);
+      // Direct upload (multi-file or no auto-split)
+      await performUpload();
     } catch (e: any) {
       setError(e.message);
     } finally {
       setLoading(false);
     }
+  };
+
+  // Confirm split and proceed to upload
+  const handleConfirmSplit = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      await performUpload();
+    } catch (e: any) {
+      setError(e.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Cancel split preview
+  const handleCancelSplit = () => {
+    setSplitPreview(null);
+    setDeletedChapterIndices(new Set());
+    setPreviewingChapterIdx(null);
+    setStep('upload');
+  };
+
+  // Actual upload logic
+  const performUpload = async () => {
+    // Create session
+    const sessionRes = await fetch(`${API_BASE}/api/sessions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: sessionName || '新小说' }),
+    });
+    const sessionData = await sessionRes.json();
+    const newSessionId = sessionData.session.id;
+    setSessionId(newSessionId);
+
+    // Upload content
+    const content = autoSplit && files.length === 1
+      ? files[0].content
+      : files.map(f => `第${f.number}章 ${f.title.replace(/^第\d+章\s*/, '')}\n\n${f.content}`).join('\n\n');
+
+    const uploadRes = await fetch(`${API_BASE}/api/sessions/${newSessionId}/upload`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content }),
+    });
+    const uploadData = await uploadRes.json();
+    if (!uploadRes.ok) throw new Error(uploadData.error || tr('上传失败', 'Upload failed'));
+
+    setChapterCount(uploadData.chapterCount);
+    setTargetNodeCount(Math.round(uploadData.chapterCount * 0.8));
+    addLog('upload', lang === 'en'
+      ? `Upload succeeded: ${uploadData.chapterCount} chapters`
+      : `上传成功: ${uploadData.chapterCount} 章`);
+
+    // Clear preview state
+    setSplitPreview(null);
+
+    // Start indexing
+    setStep('indexing');
+    setProgress(0);
+    const indexRes = await fetch(`${API_BASE}/api/sessions/${newSessionId}/index`, { method: 'POST' });
+    const indexData = await indexRes.json();
+    setTaskId(indexData.taskId);
   };
 
   // Generate plan with mode
@@ -518,14 +578,30 @@ export default function App() {
     if (!sessionId) return;
     setNodes(prev => prev.map(n => n.id === nodeId ? { ...n, status: 'generating', content: undefined } : n));
     setGeneratingNodeId(nodeId);
-    setThoughts([]);
+    // Don't clear thoughts - let them accumulate
 
-    await fetch(`${API_BASE}/api/sessions/${sessionId}/nodes/${nodeId}/reroll`, {
+    // Fetch and handle response to get taskId for event subscription
+    fetch(`${API_BASE}/api/sessions/${sessionId}/nodes/${nodeId}/reroll`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ autoReview }),
-    });
-    addLog('reroll', `正在重新生成节点 #${nodeId}`);
+    })
+      .then(res => res.json())
+      .then(data => {
+        if (data.success && data.taskId) {
+          // Update taskId so SSE subscription picks up reroll events
+          setTaskId(data.taskId);
+        }
+      })
+      .catch(err => {
+        console.error('Reroll request failed:', err);
+        setError(tr('重roll请求失败', 'Reroll request failed'));
+        // Reset node status on failure
+        setNodes(prev => prev.map(n => n.id === nodeId ? { ...n, status: 'completed' } : n));
+        setGeneratingNodeId(null);
+      });
+
+    addLog('reroll', tr(`重新生成节点 #${nodeId}`, `Regenerating node #${nodeId}`));
   };
 
   // Restart
@@ -622,7 +698,7 @@ export default function App() {
               }}
               className="btn btn-ghost"
               style={{ marginLeft: '0.5rem' }}
-> 
+            >
               {tr('🔁 重试规划', '🔁 Retry planning')}
             </button>
           )}
@@ -721,6 +797,136 @@ export default function App() {
                 ? tr('处理中...', 'Processing...')
                 : tr(`🚀 开始处理 (${files.length} 个文件)`, `🚀 Start processing (${files.length} files)`)}
             </button>
+          </div>
+        )}
+
+        {/* SPLIT PREVIEW */}
+        {step === 'split-preview' && splitPreview && (
+          <div className="split-preview-view">
+            <div className="split-preview-header">
+              <h2>{tr('📝 章节拆分预览', '📝 Chapter Split Preview')}</h2>
+              <div className="split-preview-meta">
+                <span className={`lang-badge ${splitPreview.detectedLanguage}`}>
+                  {splitPreview.detectedLanguage === 'cn' ? '中文' :
+                    splitPreview.detectedLanguage === 'en' ? 'English' : 'Mixed'}
+                </span>
+                <span>
+                  {(() => {
+                    const remaining = splitPreview.chapters.filter((_, i) => !deletedChapterIndices.has(i));
+                    const totalChars = remaining.reduce((sum, ch) => sum + ch.contentLength, 0);
+                    return tr(
+                      `共 ${remaining.length} 章 · ${totalChars.toLocaleString()} 字`,
+                      `${remaining.length} chapters · ${totalChars.toLocaleString()} chars`
+                    );
+                  })()}
+                </span>
+                {deletedChapterIndices.size > 0 && (
+                  <span style={{ color: 'var(--gray-400)', fontSize: '0.875rem' }}>
+                    ({tr(`已删除 ${deletedChapterIndices.size} 章`, `${deletedChapterIndices.size} deleted`)})
+                  </span>
+                )}
+              </div>
+            </div>
+
+            {splitPreview.chapters.filter((_, i) => !deletedChapterIndices.has(i)).length === 1 && (
+              <div className="split-warning">
+                ⚠️ {tr(
+                  '仅保留 1 个章节，可能章节标记格式不被识别。',
+                  'Only 1 chapter remaining. Chapter markers may not be recognized.'
+                )}
+              </div>
+            )}
+
+            <div className="split-chapter-list">
+              {splitPreview.chapters.map((ch, i) => {
+                const isDeleted = deletedChapterIndices.has(i);
+                if (isDeleted) return null;
+                return (
+                  <div key={i} className="split-chapter-item">
+                    <span className="chapter-num">
+                      {ch.number > 0 ? `#${ch.number}` : tr('序', 'Prologue')}
+                    </span>
+                    <span
+                      className="chapter-title clickable"
+                      onClick={() => setPreviewingChapterIdx(i)}
+                      title={tr('点击预览', 'Click to preview')}
+                    >
+                      {ch.title || tr('(无标题)', '(Untitled)')}
+                    </span>
+                    <span className="chapter-length">
+                      {ch.contentLength.toLocaleString()} {tr('字', 'chars')}
+                    </span>
+                    <button
+                      className="chapter-delete-btn"
+                      onClick={() => setDeletedChapterIndices(prev => new Set([...prev, i]))}
+                      title={tr('删除此章节', 'Delete this chapter')}
+                    >
+                      ×
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+
+            {deletedChapterIndices.size > 0 && (
+              <button
+                onClick={() => setDeletedChapterIndices(new Set())}
+                className="btn btn-ghost"
+                style={{ alignSelf: 'center', fontSize: '0.875rem' }}
+              >
+                {tr('↩ 恢复所有已删除章节', '↩ Restore all deleted chapters')}
+              </button>
+            )}
+
+            <div className="split-preview-actions">
+              <button onClick={handleCancelSplit} className="btn btn-ghost">
+                {tr('← 返回修改', '← Go back')}
+              </button>
+              <button
+                onClick={handleConfirmSplit}
+                disabled={loading || splitPreview.chapters.filter((_, i) => !deletedChapterIndices.has(i)).length === 0}
+                className="btn btn-primary btn-lg"
+              >
+                {loading
+                  ? tr('处理中...', 'Processing...')
+                  : tr('✅ 确认并开始索引', '✅ Confirm and start indexing')}
+              </button>
+            </div>
+
+            {/* Chapter Preview Modal */}
+            {previewingChapterIdx !== null && splitPreview && (
+              <div className="chapter-preview-modal-overlay" onClick={() => setPreviewingChapterIdx(null)}>
+                <div className="chapter-preview-modal" onClick={e => e.stopPropagation()}>
+                  <div className="modal-header">
+                    <h3>
+                      {splitPreview.chapters[previewingChapterIdx]?.title || tr('章节预览', 'Chapter Preview')}
+                    </h3>
+                    <button onClick={() => setPreviewingChapterIdx(null)}>×</button>
+                  </div>
+                  <div className="modal-content">
+                    {(() => {
+                      const ch = splitPreview.chapters[previewingChapterIdx];
+                      if (!ch) return tr('无内容', 'No content');
+                      return (
+                        <>
+                          <pre style={{ whiteSpace: 'pre-wrap', fontFamily: 'inherit' }}>
+                            {ch.contentPreview}
+                            {ch.contentLength > 2000 && '\n\n...'}
+                          </pre>
+                          <p style={{ color: 'var(--gray-400)', marginTop: '1rem', fontSize: '0.875rem' }}>
+                            {ch.contentLength > 2000
+                              ? tr(`显示前 2000 字，共 ${ch.contentLength.toLocaleString()} 字`,
+                                `Showing first 2000 chars of ${ch.contentLength.toLocaleString()}`)
+                              : tr(`全文 ${ch.contentLength.toLocaleString()} 字`,
+                                `Full content: ${ch.contentLength.toLocaleString()} chars`)}
+                          </p>
+                        </>
+                      );
+                    })()}
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
         )}
 

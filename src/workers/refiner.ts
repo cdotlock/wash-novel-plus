@@ -11,6 +11,11 @@ import { tryParseJson, parseJsonField } from '../lib/json-utils.js';
 import { ReviewResponseSchema } from '../schemas/llm-responses.js';
 import { ReviewingJobData } from '../lib/queue.js';
 import { Node } from '../schemas/node.js';
+import { config } from '../config/index.js';
+
+// Bilingual helper
+const isCn = () => config.novelLanguage === 'cn';
+const tr = (cn: string, en: string) => isCn() ? cn : en;
 
 export async function processReviewingJob(job: Job<ReviewingJobData>): Promise<void> {
     const { sessionId, taskId, autoFix, model, nodeId } = job.data;
@@ -42,7 +47,10 @@ export async function processReviewingJob(job: Job<ReviewingJobData>): Promise<v
 
     await publishEvent(channel, {
         type: 'thought',
-        message: `[Review] 加载会话 ${sessionId}，可审核节点数 ${Object.keys(nodes).length}`,
+        message: tr(
+            `[Review] 加载会话，${Object.keys(nodes).length} 个节点可审核`,
+            `[Review] Session loaded. ${Object.keys(nodes).length} nodes available for review`
+        ),
         data: { sessionId, totalNodes: Object.keys(nodes).length },
     });
 
@@ -88,11 +96,11 @@ export async function processReviewingJob(job: Job<ReviewingJobData>): Promise<v
         });
 
         try {
-            // Generate review prompt via Langfuse
+            // Generate review prompt via Langfuse with correct language
             const prompt = await getReviewPrompt({
                 nodeContent: node.content,
                 nodeType: node.type,
-                language: 'cn',
+                language: config.novelLanguage as 'cn' | 'en',
             });
 
             // Call LLM
@@ -127,7 +135,10 @@ export async function processReviewingJob(job: Job<ReviewingJobData>): Promise<v
 
                 await publishEvent(channel, {
                     type: 'thought',
-                    message: `[Review] 节点 #${node.id} 评分：${review.score}/5` + (review.issues?.length ? `，问题：${review.issues.join('；')}` : ''),
+                    message: tr(
+                        `[Review] 节点 #${node.id} 评分：${review.score}/5` + (review.issues?.length ? `，问题：${review.issues.join('；')}` : ''),
+                        `[Review] Node #${node.id} score: ${review.score}/5` + (review.issues?.length ? `. Issues: ${review.issues.join('; ')}` : '')
+                    ),
                     data: { nodeId: node.id, score: review.score },
                 });
 

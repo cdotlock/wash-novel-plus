@@ -46,16 +46,20 @@ export async function getPrompt(
     const cached = promptCache.get(name);
 
     if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
+        const remainingMs = CACHE_TTL - (Date.now() - cached.timestamp);
+        console.log(`📦 [Langfuse] Cache hit: ${name} (expires in ${Math.round(remainingMs / 1000)}s)`);
         return cached.prompt.compile(variables);
     }
+
+    console.log(`🔄 [Langfuse] Fetching: ${name} (lang=${lang})`);
 
     try {
         const prompt = await langfuse.getPrompt(name);
         promptCache.set(name, { prompt, timestamp: Date.now() });
+        console.log(`✅ [Langfuse] Loaded: ${name}`);
         return prompt.compile(variables);
     } catch (error) {
-        console.error(`Error fetching Langfuse prompt "${name}":`, error);
-        // Fallback to base name if specific lang not found (optional, but requested strict separation)
+        console.error(`❌ [Langfuse] Error fetching "${name}":`, error);
         throw new Error(`Langfuse Error: Failed to fetch prompt "${name}". Please check you have uploaded the prompt with correct suffix.`);
     }
 }

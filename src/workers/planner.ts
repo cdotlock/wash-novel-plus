@@ -11,6 +11,7 @@ import { PlanningJobData } from '../lib/queue.js';
 import { ChapterIndex } from '../schemas/session.js';
 import { EventPlan } from '../schemas/plan.js';
 import { getPlanningPrompt } from '../lib/langfuse.js';
+import { config } from '../config/index.js';
 
 export async function processPlanningJob(job: Job<PlanningJobData>): Promise<void> {
     const { sessionId, taskId, mode, targetNodeCount, model } = job.data;
@@ -107,6 +108,7 @@ export async function processPlanningJob(job: Job<PlanningJobData>): Promise<voi
                 // 如果用户没有填，就把索引阶段推荐的节点数传给提示，以提高稳定性
                 targetNodeCount: effectiveTargetNodeCount,
                 customInstructions: (job.data as any).customInstructions,
+                language: config.novelLanguage as 'cn' | 'en',
             });
 
             await publishEvent(channel, {

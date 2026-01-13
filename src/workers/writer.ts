@@ -13,6 +13,10 @@ import { Chapter } from '../schemas/session.js';
 import { Node } from '../schemas/node.js';
 import { config } from '../config/index.js';
 
+// Bilingual message helper
+const isCn = () => config.novelLanguage === 'cn';
+const tr = (cn: string, en: string) => isCn() ? cn : en;
+
 export async function processGeneratingJob(job: Job<GeneratingJobData>): Promise<void> {
     const { sessionId, taskId, nodeId, startFromNode, model } = job.data;
     const channel = channels.jobEvents(taskId);
@@ -32,7 +36,10 @@ export async function processGeneratingJob(job: Job<GeneratingJobData>): Promise
 
     await publishEvent(channel, {
         type: 'thought',
-        message: `[Writer] 加载会话 ${sessionId}，共有 ${Object.keys(nodes).length} 个节点，使用模型 ${model ?? getModel(MODEL_ROUTER.writer)}`,
+        message: tr(
+            `[Writer] 加载会话，共 ${Object.keys(nodes).length} 个节点，模型 ${model ?? getModel(MODEL_ROUTER.writer)}`,
+            `[Writer] Session loaded. ${Object.keys(nodes).length} nodes. Model: ${model ?? getModel(MODEL_ROUTER.writer)}`
+        ),
         data: { sessionId, totalNodes: Object.keys(nodes).length },
     });
 
@@ -79,7 +86,10 @@ export async function processGeneratingJob(job: Job<GeneratingJobData>): Promise
 
         await publishEvent(channel, {
             type: 'thought',
-            message: `[Writer] 准备生成节点 #${node.id} (${node.type})，章节范围 ${node.startChapter}-${node.endChapter}`,
+            message: tr(
+                `[Writer] 开始处理节点 #${node.id} (${node.type})，章节 ${node.startChapter}-${node.endChapter}`,
+                `[Writer] Starting node #${node.id} (${node.type}), chapters ${node.startChapter}-${node.endChapter}`
+            ),
             data: { nodeId: node.id, type: node.type },
         });
 
@@ -108,17 +118,23 @@ export async function processGeneratingJob(job: Job<GeneratingJobData>): Promise
                 break;
             }
 
-            // Emit node_start event
+            // Emit node_start event with bilingual message
             await publishEvent(channel, {
                 type: 'node_start',
-                message: `Starting node ${node.id}`,
+                message: tr(
+                    `🚀 开始生成节点 #${node.id}：${node.description.slice(0, 40)}...`,
+                    `🚀 Starting node #${node.id}: ${node.description.slice(0, 40)}...`
+                ),
                 data: { nodeId: node.id, type: node.type },
             });
 
             // Stage 1: Generate content
             await publishEvent(channel, {
                 type: 'thought',
-                message: `[思考中] 正在构思节点 ${node.id} 的叙事内容（模型：${resolvedModel}）...`,
+                message: tr(
+                    `[思考中] 正在生成节点 #${node.id} 的内容（模型：${resolvedModel}）`,
+                    `[Thinking] Generating content for node #${node.id} (Model: ${resolvedModel})`
+                ),
                 data: { nodeId: node.id, model: resolvedModel },
             });
 
@@ -145,7 +161,10 @@ export async function processGeneratingJob(job: Job<GeneratingJobData>): Promise
 
             await publishEvent(channel, {
                 type: 'thought',
-                message: `[Writer] 节点 #${node.id} 文本生成完成，长度约 ${cleanedContent.length} 字，开始更新全局记忆`,
+                message: tr(
+                    `[Writer] 节点 #${node.id} 生成完成，${cleanedContent.length} 字。更新记忆中...`,
+                    `[Writer] Node #${node.id} complete. ${cleanedContent.length} chars. Updating memory...`
+                ),
                 data: { nodeId: node.id, contentLength: cleanedContent.length },
             });
 
@@ -171,7 +190,10 @@ export async function processGeneratingJob(job: Job<GeneratingJobData>): Promise
 
                 await publishEvent(channel, {
                     type: 'thought',
-                    message: `[Memory] 全局记忆已根据节点 #${node.id} 更新`,
+                    message: tr(
+                        `[Memory] 全局记忆已更新 (节点 #${node.id})`,
+                        `[Memory] Global memory updated (node #${node.id})`
+                    ),
                     data: { nodeId: node.id },
                 });
             } catch (memoryError) {
@@ -185,7 +207,7 @@ export async function processGeneratingJob(job: Job<GeneratingJobData>): Promise
                 status: 'completed',
             };
 
-        await prisma.session.update({
+            await prisma.session.update({
                 where: { id: sessionId },
                 data: {
                     nodes,
@@ -234,9 +256,9 @@ export async function processGeneratingJob(job: Job<GeneratingJobData>): Promise
             };
 
             await prisma.session.update({
-            where: { id: sessionId },
-            data: { nodes },
-        });
+                where: { id: sessionId },
+                data: { nodes },
+            });
 
             await publishEvent(channel, {
                 type: 'error',
