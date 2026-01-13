@@ -21,6 +21,9 @@ export async function processGeneratingJob(job: Job<GeneratingJobData>): Promise
     const { sessionId, taskId, nodeId, startFromNode, model } = job.data;
     const channel = channels.jobEvents(taskId);
 
+    console.log(`\n✍️  [Writer] Starting job for session: ${sessionId.slice(0, 8)}...`);
+    console.log(`   Task: ${taskId}, NodeId: ${nodeId ?? 'all'}, Model: ${model ?? getModel(MODEL_ROUTER.writer)}`);
+
     // Get session data
     const session = await prisma.session.findUnique({
         where: { id: sessionId },

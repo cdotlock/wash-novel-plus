@@ -21,6 +21,9 @@ export async function processReviewingJob(job: Job<ReviewingJobData>): Promise<v
     const { sessionId, taskId, autoFix, model, nodeId } = job.data;
     const channel = channels.jobEvents(taskId);
 
+    console.log(`\n🔍 [Refiner] Starting review job for session: ${sessionId.slice(0, 8)}...`);
+    console.log(`   Mode: ${nodeId ? 'single-node' : 'batch'}, AutoFix: ${autoFix ?? false}, Model: ${model ?? getModel(MODEL_ROUTER.refiner)}`);
+
     await publishEvent(channel, {
         type: 'thought',
         message: `[Review] Dispatching review job via queue "reviewing" (mode=${nodeId ? 'single-node' : 'batch'}, autoFix=${autoFix ?? false}, model=${model ?? getModel(MODEL_ROUTER.refiner)})`,

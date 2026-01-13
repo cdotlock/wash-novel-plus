@@ -17,6 +17,9 @@ export async function processIndexingJob(job: Job<IndexingJobData>): Promise<voi
     const { sessionId, taskId, model } = job.data;
     const channel = channels.jobEvents(taskId);
 
+    console.log(`\n📚 [Indexer] Starting job for session: ${sessionId.slice(0, 8)}...`);
+    console.log(`   Task: ${taskId}, Model: ${model ?? getModel(MODEL_ROUTER.indexer)}`);
+
     // Get session data
     const session = await prisma.session.findUnique({
         where: { id: sessionId },
@@ -44,6 +47,8 @@ export async function processIndexingJob(job: Job<IndexingJobData>): Promise<voi
 
     const chapterIndex: ChapterIndex[] = [];
     const resolvedModel = model ?? getModel(MODEL_ROUTER.indexer);
+
+    console.log(`📖 [Indexer] Processing ${total} chapters in batches of 5...`);
 
     // Process chapters in parallel batches
     const batchSize = 5;
@@ -165,4 +170,7 @@ export async function processIndexingJob(job: Job<IndexingJobData>): Promise<voi
         message: `Indexing complete! ${chapterIndex.length} chapters indexed.`,
         data: { indexedCount: chapterIndex.length, analysis: contentAnalysis },
     });
+
+    console.log(`✅ [Indexer] Complete! ${chapterIndex.length} chapters indexed.`);
+    console.log(`   Recommended mode: ${contentAnalysis.recommendedMode}, Target nodes: ${contentAnalysis.targetNodeCount}\n`);
 }

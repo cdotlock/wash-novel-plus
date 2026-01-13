@@ -17,6 +17,9 @@ export async function processPlanningJob(job: Job<PlanningJobData>): Promise<voi
     const { sessionId, taskId, mode, targetNodeCount, model } = job.data;
     const channel = channels.jobEvents(taskId);
 
+    console.log(`\n📝 [Planner] Starting job for session: ${sessionId.slice(0, 8)}...`);
+    console.log(`   Mode: ${mode ?? 'auto'}, Target: ${targetNodeCount ?? 'auto'}, Model: ${model ?? getModel(MODEL_ROUTER.planner)}`);
+
     try {
         // Get session data
         const session = await prisma.session.findUnique({
