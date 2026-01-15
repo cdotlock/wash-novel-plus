@@ -1,7 +1,9 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import './App.css';
 
-const API_BASE = 'http://localhost:3000';
+const API_BASE =
+  import.meta.env.VITE_API_BASE ??
+  (import.meta.env.DEV ? 'http://localhost:3000' : '');
 
 type AppStep = 'upload' | 'split-preview' | 'indexing' | 'planning' | 'executing';
 type PlanMode = 'auto' | 'split' | 'merge' | 'one_to_one';
@@ -97,7 +99,7 @@ export default function App() {
   // Generation state
   const [nodes, setNodes] = useState<Node[]>([]);
   const [selectedNodeId, setSelectedNodeId] = useState<number | null>(null);
-  const [generatingNodeId, setGeneratingNodeId] = useState<number | null>(null);
+  const [, setGeneratingNodeId] = useState<number | null>(null);
   const [isPaused, setIsPaused] = useState(false);
 
   const [nextStepInstruction, setNextStepInstruction] = useState('');

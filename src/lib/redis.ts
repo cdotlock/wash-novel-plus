@@ -2,7 +2,7 @@
  * Redis client instance
  * Used for BullMQ queues and Pub/Sub
  */
-import Redis from 'ioredis';
+import { Redis } from 'ioredis';
 import { config } from '../config/index.js';
 
 // Redis connection options with reconnection
@@ -17,9 +17,9 @@ const redisOptions = {
 };
 
 // Main Redis connection
-export const redis = new Redis(config.redis.url, redisOptions);
+export const redis: Redis = new Redis(config.redis.url, redisOptions);
 
-redis.on('error', (err) => {
+redis.on('error', (err: Error) => {
     console.error('Redis connection error:', err.message);
 });
 
@@ -30,7 +30,7 @@ redis.on('connect', () => {
 // Create a duplicate connection for subscribers (Pub/Sub requires separate connection)
 export function createSubscriber(): Redis {
     const sub = new Redis(config.redis.url, redisOptions);
-    sub.on('error', (err) => {
+    sub.on('error', (err: Error) => {
         console.error('Redis subscriber error:', err.message);
     });
     return sub;

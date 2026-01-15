@@ -159,7 +159,7 @@ export async function processReviewingJob(job: Job<ReviewingJobData>): Promise<v
                     nodes[String(node.id)] = {
                         ...nodes[String(node.id)],
                         status: 'generating',
-                        content: undefined,
+                        content: '',
                         // @ts-ignore
                         rerollCount: rerollCount + 1,
                     };

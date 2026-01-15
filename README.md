@@ -282,4 +282,47 @@ REDIS_URL=redis://localhost:6379
 DEEPSEEK_API_KEY=your_api_key_here
 DEEPSEEK_BASE_URL=https://api.deepseek.com
 DEEPSEEK_MODEL_CHAT=deepseek-chat
-DE
+DEEPSEEK_MODEL_REASONING=deepseek-reasoner
+
+# Langfuse - Prompt Management & Observability
+LANGFUSE_SECRET_KEY=your_langfuse_secret
+LANGFUSE_PUBLIC_KEY=your_langfuse_public
+LANGFUSE_BASE_URL=https://cloud.langfuse.com
+
+# Worker Configuration
+WORKER_CONCURRENCY_INDEX=5
+WORKER_CONCURRENCY_GENERATE=3
+WORKER_CONCURRENCY_REVIEW=5
+
+# Server Configuration
+PORT=3000
+HOST=0.0.0.0
+NODE_ENV=development
+
+# Language
+NOVEL_LANGUAGE=cn
+```
+
+---
+
+## 生产部署（Docker Compose）
+
+### 1. 配置生产环境变量
+
+```bash
+cp .env.production.example .env.production
+# 编辑 .env.production，填入 LLM / Langfuse 等密钥
+```
+
+### 2. 一键启动（构建 + 运行）
+
+```bash
+docker compose -f docker-compose.prod.yml up -d --build
+```
+
+### 3. 访问入口（默认冷门端口）
+
+- Web UI：http://localhost:31801
+- API：http://localhost:31800
+
+> 容器内部固定端口：API=8000、Web=8001；如需改外部端口，修改 `.env.production` 中的 `API_HOST_PORT` / `WEB_HOST_PORT`。

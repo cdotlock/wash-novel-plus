@@ -80,7 +80,7 @@ export async function processIndexingJob(job: Job<IndexingJobData>): Promise<voi
                             number: chapter.number,
                             title: chapter.title,
                             summary: result.data.summary,
-                            characters: result.data.characters,
+                            characters: result.data.characters as string[],
                             keyEvent: result.data.key_event,
                             type: result.data.type as 'highlight' | 'normal',
                         } satisfies ChapterIndex;

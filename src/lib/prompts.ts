@@ -22,9 +22,9 @@ Handlebars.registerHelper('lt', (a, b) => a < b);
 Handlebars.registerHelper('and', (a, b) => a && b);
 Handlebars.registerHelper('or', (a, b) => a || b);
 Handlebars.registerHelper('not', (a) => !a);
-Handlebars.registerHelper('lang', () => config.language);
-Handlebars.registerHelper('isCn', () => config.language === 'cn');
-Handlebars.registerHelper('isEn', () => config.language === 'en');
+Handlebars.registerHelper('lang', () => config.novelLanguage);
+Handlebars.registerHelper('isCn', () => config.novelLanguage === 'cn');
+Handlebars.registerHelper('isEn', () => config.novelLanguage === 'en');
 
 // Load a template
 function loadTemplate(name: string): HandlebarsTemplateDelegate {
@@ -46,9 +46,9 @@ function loadTemplate(name: string): HandlebarsTemplateDelegate {
 }
 
 // Get rendered prompt
-export function getPrompt(name: string, context: Record<string, unknown> = {}): string {
+export function getPrompt<T extends object>(name: string, context: T = {} as T): string {
     const template = loadTemplate(name);
-    return template({ ...context, lang: config.language });
+    return template({ ...context, lang: config.novelLanguage });
 }
 
 // Prompt context types

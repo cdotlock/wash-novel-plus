@@ -36,20 +36,21 @@ await app.register(cors, {
 });
 
 // Global error handler
-app.setErrorHandler((error, request, reply) => {
-    app.log.error(error);
+app.setErrorHandler((error: any, request, reply) => {
+    const err = error as any;
+    app.log.error(err);
 
     // Zod validation errors
-    if (error.name === 'ZodError') {
+    if (err?.name === 'ZodError') {
         return reply.status(400).send({
             error: 'Validation error',
-            details: error.issues,
+            details: err.issues,
         });
     }
 
     // Default error response
-    return reply.status(error.statusCode ?? 500).send({
-        error: error.message ?? 'Internal server error',
+    return reply.status(err?.statusCode ?? 500).send({
+        error: err?.message ?? 'Internal server error',
     });
 });
 
@@ -75,7 +76,7 @@ const shutdown = async (signal: string) => {
         await prisma.$disconnect();
         process.exit(0);
     } catch (error) {
-        app.log.error('Error during shutdown:', error);
+        app.log.error({ err: error }, 'Error during shutdown');
         process.exit(1);
     }
 };

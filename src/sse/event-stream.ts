@@ -97,7 +97,7 @@ export async function createJobEventStream(
         }
     });
 
-    subscriber.on('error', (err) => {
+    subscriber.on('error', (err: Error) => {
         console.error('Subscriber error:', err.message);
     });
 
@@ -180,7 +180,7 @@ export async function createSessionEventStream(
         }
     });
 
-    subscriber.on('error', (err) => {
+    subscriber.on('error', (err: Error) => {
         console.error('Subscriber error:', err.message);
     });
 

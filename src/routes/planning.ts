@@ -131,7 +131,7 @@ export async function planningRoutes(app: FastifyInstance): Promise<void> {
                     events = rawEvents;
                 }
             } catch (e) {
-                app.log.error('Failed to parse planEvents JSON', e);
+                app.log.error({ err: e }, 'Failed to parse planEvents JSON');
                 events = [];
             }
 
@@ -142,7 +142,7 @@ export async function planningRoutes(app: FastifyInstance): Promise<void> {
                     analysis = rawAnalysis;
                 }
             } catch (e) {
-                app.log.error('Failed to parse contentAnalysis JSON', e);
+                app.log.error({ err: e }, 'Failed to parse contentAnalysis JSON');
                 analysis = {};
             }
 

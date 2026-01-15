@@ -1,0 +1,93 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: wash-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: wash
+      POSTGRES_PASSWORD: wash
+      POSTGRES_DB: wash
+    ports:
+      - "54321:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U wash -d wash" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: wash-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: [ "CMD", "redis-cli", "ping" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: wash-api
+    restart: unless-stopped
+    env_file:
+      - .env.production
+    environment:
+      NODE_ENV: production
+      PORT: 8000
+      HOST: 0.0.0.0
+      DATABASE_URL: ${DATABASE_URL:-postgresql://wash:wash@postgres:5432/wash?schema=public}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+      RUN_DB_MIGRATIONS: "true"
+    ports:
+      - "${API_HOST_PORT:-31800}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: wash-worker
+    restart: unless-stopped
+    env_file:
+      - .env.production
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: ${DATABASE_URL:-postgresql://wash:wash@postgres:5432/wash?schema=public}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+      RUN_DB_MIGRATIONS: "false"
+    command: ["node", "dist/workers/index.js"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  web:
+    build:
+      context: .
+      dockerfile: web-ui/Dockerfile
+    container_name: wash-web
+    restart: unless-stopped
+    ports:
+      - "${WEB_HOST_PORT:-31801}:8001"
+    depends_on:
+      - api
+
+volumes:
+  postgres_data:
+  redis_data:

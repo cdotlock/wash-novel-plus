@@ -75,7 +75,6 @@ export interface GeneratingJobData {
 export interface ReviewingJobData {
     sessionId: string;
     taskId: string;
-    taskId: string;
     nodeId?: number; // Review specific node
     autoFix?: boolean;
     model?: string;

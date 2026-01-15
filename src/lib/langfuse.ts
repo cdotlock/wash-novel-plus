@@ -48,7 +48,7 @@ export async function getPrompt(
     if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
         const remainingMs = CACHE_TTL - (Date.now() - cached.timestamp);
         console.log(`📦 [Langfuse] Cache hit: ${name} (expires in ${Math.round(remainingMs / 1000)}s)`);
-        return cached.prompt.compile(variables);
+        return cached.prompt.compile(variables as Record<string, string>);
     }
 
     console.log(`🔄 [Langfuse] Fetching: ${name} (lang=${lang})`);
@@ -57,7 +57,7 @@ export async function getPrompt(
         const prompt = await langfuse.getPrompt(name);
         promptCache.set(name, { prompt, timestamp: Date.now() });
         console.log(`✅ [Langfuse] Loaded: ${name}`);
-        return prompt.compile(variables);
+        return prompt.compile(variables as Record<string, string>);
     } catch (error) {
         console.error(`❌ [Langfuse] Error fetching "${name}":`, error);
         throw new Error(`Langfuse Error: Failed to fetch prompt "${name}". Please check you have uploaded the prompt with correct suffix.`);
@@ -131,7 +131,7 @@ export async function getMemoryPrompt(vars: {
     nodeContent: string;
     previousMemory: string;
     language: 'cn' | 'en';
-}): Promise<string> {
+}): Promise<string | any[]> {
     return getPrompt(PROMPT_NAMES.WASH_MEMORY, vars);
 }
 
@@ -142,7 +142,7 @@ export async function getReviewPrompt(vars: {
     nodeContent: string;
     nodeType: 'highlight' | 'normal';
     language: 'cn' | 'en';
-}): Promise<string> {
+}): Promise<string | any[]> {
     return getPrompt(PROMPT_NAMES.REVIEW, vars);
 }
 
