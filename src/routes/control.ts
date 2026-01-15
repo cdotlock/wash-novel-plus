@@ -15,6 +15,7 @@ const ResumeSchema = z.object({
 
 const RerollSchema = z.object({
     autoReview: z.boolean().optional(),
+    remapCharacters: z.boolean().optional(),
 });
 
 export async function controlRoutes(app: FastifyInstance): Promise<void> {
@@ -149,6 +150,7 @@ export async function controlRoutes(app: FastifyInstance): Promise<void> {
                 nodeId: nodeIdNum,
                 reroll: true,
                 autoReview,
+                remapCharacters: body.remapCharacters,
             });
 
             // Notify via session stream for immediate UI feedback

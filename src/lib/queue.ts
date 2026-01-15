@@ -23,6 +23,7 @@ export const QUEUE_NAMES = {
     PLANNING: 'planning',
     GENERATING: 'generating',
     REVIEWING: 'reviewing',
+    BRANCHING: 'branching',
 } as const;
 
 // Common BullMQ queue options.
@@ -43,6 +44,7 @@ export const queues = {
     planning: new Queue(QUEUE_NAMES.PLANNING, { ...baseQueueOpts }),
     generating: new Queue(QUEUE_NAMES.GENERATING, { ...baseQueueOpts }),
     reviewing: new Queue(QUEUE_NAMES.REVIEWING, { ...baseQueueOpts }),
+    branching: new Queue(QUEUE_NAMES.BRANCHING, { ...baseQueueOpts }),
 };
 
 // Flow producer for parent-child job relationships
@@ -70,6 +72,8 @@ export interface GeneratingJobData {
     startFromNode?: number; // Resume from this node
     model?: string;
     autoReview?: boolean;
+    // When true, apply character renaming pipeline after generation
+    remapCharacters?: boolean;
 }
 
 export interface ReviewingJobData {
@@ -77,6 +81,12 @@ export interface ReviewingJobData {
     taskId: string;
     nodeId?: number; // Review specific node
     autoFix?: boolean;
+    model?: string;
+}
+
+export interface BranchingJobData {
+    sessionId: string;
+    taskId: string;
     model?: string;
 }
 

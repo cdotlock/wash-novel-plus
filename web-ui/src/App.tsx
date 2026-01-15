@@ -5,7 +5,7 @@ const API_BASE =
   import.meta.env.VITE_API_BASE ??
   (import.meta.env.DEV ? 'http://localhost:3000' : '');
 
-type AppStep = 'upload' | 'split-preview' | 'indexing' | 'planning' | 'executing';
+type AppStep = 'upload' | 'split-preview' | 'indexing' | 'planning' | 'executing' | 'branching';
 type PlanMode = 'auto' | 'split' | 'merge' | 'one_to_one';
 
 interface FileChapter {
@@ -33,6 +33,10 @@ interface Node {
   endChapter: number;
   qualityScore?: number;
   reviewIssues?: string[];
+  // Optional branch metadata (present for auto-generated side branches)
+  branchKind?: 'divergent' | 'convergent';
+  parentNodeId?: number;
+  returnToNodeId?: number | null;
 }
 
 interface LogEntry {
@@ -71,6 +75,8 @@ export default function App() {
   const [sessionName, setSessionName] = useState('');
   const [files, setFiles] = useState<FileChapter[]>([]);
   const [autoSplit, setAutoSplit] = useState(false);
+  // Whether to apply the character renaming pipeline after generation
+  const [remapCharacters, setRemapCharacters] = useState(false);
   const [chapterCount, setChapterCount] = useState(0);
   const [splitPreview, setSplitPreview] = useState<SplitPreview | null>(null);
   const [previewingChapterIdx, setPreviewingChapterIdx] = useState<number | null>(null);
@@ -99,6 +105,8 @@ export default function App() {
   // Generation state
   const [nodes, setNodes] = useState<Node[]>([]);
   const [selectedNodeId, setSelectedNodeId] = useState<number | null>(null);
+  const [nodeViewMode, setNodeViewMode] = useState<'main' | 'branch'>('main');
+  const [characterMap, setCharacterMap] = useState<Record<string, string>>({});
   const [, setGeneratingNodeId] = useState<number | null>(null);
   const [isPaused, setIsPaused] = useState(false);
 
@@ -106,6 +114,9 @@ export default function App() {
   const [autoReview, setAutoReview] = useState(true);
   const [isBatchReviewing, setIsBatchReviewing] = useState(false);
   const [isPlanning, setIsPlanning] = useState(false);
+  const [isAdjustingPlan, setIsAdjustingPlan] = useState(false);
+  const [isBranching, setIsBranching] = useState(false);
+  const [branchingTaskId, setBranchingTaskId] = useState<string | null>(null);
 
   // Simple i18n helper
   const tr = useCallback(
@@ -151,6 +162,9 @@ export default function App() {
           setNodes(data.nodes || []);
           setPlanMode(data.planMode || 'auto');
           setTargetNodeCount(data.targetNodeCount || 10);
+          if (typeof data.remapCharacters === 'boolean') {
+            setRemapCharacters(data.remapCharacters);
+          }
           console.log('Session restored:', data.sessionId);
         }
       } catch { }
@@ -172,9 +186,10 @@ export default function App() {
     localStorage.setItem('wash_session', JSON.stringify({
       sessionId, sessionName, step, chapterCount,
       events, nodes, planMode, targetNodeCount,
+      remapCharacters,
       savedAt: new Date().toISOString()
     }));
-  }, [initialized, sessionId, sessionName, step, chapterCount, events, nodes, planMode, targetNodeCount]);
+  }, [initialized, sessionId, sessionName, step, chapterCount, events, nodes, planMode, targetNodeCount, remapCharacters]);
 
   // Helper: fetch latest plan from server
   const fetchPlanFromServer = useCallback(async () => {
@@ -194,6 +209,17 @@ export default function App() {
       // 如果后端有推荐 targetNodeCount，就在 auto 且当前为 0 时同步到 UI；否则不覆盖用户输入
       if (planMode === 'auto' && (!targetNodeCount || targetNodeCount === 0) && recommended) {
         setTargetNodeCount(recommended);
+      }
+
+      // Also fetch characterMap once we enter planning
+      try {
+        const sessionRes = await fetch(`${API_BASE}/api/sessions/${sessionId}`);
+        if (sessionRes.ok) {
+          const sessionData = await sessionRes.json();
+          setCharacterMap(sessionData.characterMap || {});
+        }
+      } catch {
+        // ignore characterMap fetch errors
       }
 
       setStep('planning');
@@ -240,7 +266,7 @@ export default function App() {
           if (thoughtsRef.current) {
             thoughtsRef.current.scrollTop = thoughtsRef.current.scrollHeight;
           }
-        } else if (data.type === 'node_ready') {
+          } else if (data.type === 'node_ready') {
           // Node completed - can view immediately
           const nodeId = data.data?.nodeId;
           if (nodeId) {
@@ -248,7 +274,7 @@ export default function App() {
               n.id === nodeId ? { ...n, status: 'completed', content: data.data?.content } : n
             ));
             setGeneratingNodeId(null);
-            addLog('complete', `节点 #${nodeId} 生成完成`);
+            addLog('complete', tr(`节点 #${nodeId} 生成完成`, `Node #${nodeId} generated`));
           }
         } else if (data.type === 'node_start') {
           setGeneratingNodeId(data.data?.nodeId);
@@ -259,6 +285,22 @@ export default function App() {
           addLog('progress', data.message);
         } else if (data.type === 'log') {
           addLog('log', data.message);
+
+          // 分支相关的日志也会进入思考流，以便右侧实时展示 Brancher 进度
+          if (typeof data.message === 'string' && data.message.includes('[Brancher]')) {
+            setThoughts(prev => [...prev, data.message].slice(-20));
+            if (thoughtsRef.current) {
+              thoughtsRef.current.scrollTop = thoughtsRef.current.scrollHeight;
+            }
+
+            // 当 Brancher 报告某个 branchId 已生成时，增量刷新一次节点列表，
+            // 这样支线节点可以像主线一样一条条出现在左侧列表中。
+            const branchId = data.data?.branchId as number | undefined;
+            if (branchId && branchingTaskId && taskId === branchingTaskId) {
+              syncNodesFromServer();
+            }
+          }
+
           const nodeId = data.data?.nodeId as number | undefined;
           const score = data.data?.score as number | undefined;
           const issues = (data.data?.issues as string[] | undefined) ?? [];
@@ -289,7 +331,17 @@ export default function App() {
             setReviewResults(reviews);
           }
 
-          if (step === 'indexing') {
+          // If this task is an auto-branching job, refresh nodes from server
+          // so newly created branch nodes appear in the UI, then clear the
+          // branching task marker, switch to branch mode, and stop further
+          // step-based handling.
+          if (branchingTaskId && taskId === branchingTaskId) {
+            syncNodesFromServer();
+            setStep('branching');
+            setNodeViewMode('branch');
+            setBranchingTaskId(null);
+            setTaskId(null);
+          } else if (step === 'indexing') {
             // 索引完成后自动进入规划阶段
             setTaskId(null);
             handleGeneratePlan();
@@ -303,6 +355,9 @@ export default function App() {
             addLog('success', data.message);
             setTaskId(null);
             setIsBatchReviewing(false);
+          } else if (step === 'branching') {
+            addLog('success', data.message);
+            setTaskId(null);
           } else {
             setTaskId(null);
           }
@@ -321,7 +376,7 @@ export default function App() {
 
     evtSource.onerror = () => evtSource.close();
     return () => evtSource.close();
-  }, [taskId, step, addLog, fetchPlanFromServer]);
+  }, [taskId, step, addLog, fetchPlanFromServer, branchingTaskId, syncNodesFromServer]);
 
   // File handling
   const handleFileSelect = useCallback(async (selectedFiles: FileList | File[]) => {
@@ -503,6 +558,43 @@ export default function App() {
     handleGeneratePlan();
   };
 
+  // Butterfly-effect micro-tuning on top of current edited events
+  const handleAdjustPlan = async () => {
+    if (!sessionId || events.length === 0) return;
+    setIsAdjustingPlan(true);
+    setError(null);
+    try {
+      const res = await fetch(`${API_BASE}/api/sessions/${sessionId}/plan/adjust`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          mode: planMode,
+          targetNodeCount: targetNodeCount || events.length,
+          events,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || tr('微调失败', 'Adjust plan failed'));
+      }
+      if (Array.isArray(data.events)) {
+        setEvents(data.events as EventPlan[]);
+      }
+      if (data.analysis) {
+        setPlanStats({
+          recommended: (data.analysis as any).targetNodeCount,
+          actual: (data.analysis as any).lastPlanEventCount,
+          user: (data.analysis as any).lastPlanUserTarget ?? null,
+        });
+      }
+      addLog('plan', tr('已基于当前规划进行蝴蝶效应微调', 'Butterfly-effect tweak applied on current plan'));
+    } catch (e: any) {
+      setError(e.message);
+    } finally {
+      setIsAdjustingPlan(false);
+    }
+  };
+
   // Edit event
   const handleUpdateEvent = (id: number, field: keyof EventPlan, value: any) => {
     setEvents(prev => prev.map(e => e.id === id ? { ...e, [field]: value } : e));
@@ -544,7 +636,7 @@ export default function App() {
       const res = await fetch(`${API_BASE}/api/sessions/${sessionId}/generate`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ autoReview })
+        body: JSON.stringify({ autoReview, remapCharacters })
       });
       const data = await res.json();
       setTaskId(data.taskId);
@@ -586,7 +678,7 @@ export default function App() {
     fetch(`${API_BASE}/api/sessions/${sessionId}/nodes/${nodeId}/reroll`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ autoReview }),
+      body: JSON.stringify({ autoReview, remapCharacters }),
     })
       .then(res => res.json())
       .then(data => {
@@ -620,6 +712,35 @@ export default function App() {
     window.location.href = `${API_BASE}/api/sessions/${sessionId}/export`;
   };
 
+  const handleStartBranching = async () => {
+    if (!sessionId) return;
+    setIsBranching(true);
+    setError(null);
+    try {
+      const res = await fetch(`${API_BASE}/api/sessions/${sessionId}/branch`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || tr('自动支线任务创建失败', 'Failed to start auto-branching'));
+      }
+      setTaskId(data.taskId);
+      setBranchingTaskId(data.taskId);
+      // Immediately switch UI into branching mode so the user knows we're in
+      // "branch workspace" even while branches are being generated.
+      setStep('branching');
+      setNodeViewMode('branch');
+      setThoughts([]);
+      addLog('plan', tr('已启动自动支线生成任务', 'Auto-branching task started'));
+    } catch (e: any) {
+      setError(e.message);
+    } finally {
+      setIsBranching(false);
+    }
+  };
+
   // Batch review (manual, when autoReview is off)
   const handleBatchReview = async () => {
     if (!sessionId) return;
@@ -647,6 +768,22 @@ export default function App() {
   const totalChars = files.reduce((sum, f) => sum + f.content.length, 0);
   const completedNodes = nodes.filter(n => n.status === 'completed').length;
 
+  // When entering branch view with available branch nodes, auto-select the
+  // first branch node to avoid an "empty" editor feeling.
+  useEffect(() => {
+    if (!nodes.length) return;
+    if (!(step === 'executing' || step === 'branching')) return;
+    if (nodeViewMode !== 'branch') return;
+
+    const branchNodes = nodes.filter(n => !!n.branchKind);
+    if (!branchNodes.length) return;
+
+    const currentlySelectedIsBranch = branchNodes.some(n => n.id === selectedNodeId);
+    if (!currentlySelectedIsBranch) {
+      setSelectedNodeId(branchNodes[0].id);
+    }
+  }, [step, nodeViewMode, nodes, selectedNodeId]);
+
   return (
     <div className="app">
       {/* Header */}
@@ -657,9 +794,14 @@ export default function App() {
         </div>
         <div className="header-right">
           {step === 'executing' && (
-            <button onClick={handleExport} className="btn btn-secondary" style={{ marginRight: '1rem' }}>
-              {tr('📦 导出 ZIP', '📦 Export ZIP')}
-            </button>
+            <>
+              <button onClick={handleStartBranching} className="btn btn-secondary" style={{ marginRight: '0.5rem' }}>
+                {isBranching ? tr('🧬 支线中...', '🧬 Branching...') : tr('🧬 自动支线', '🧬 Auto-branch')}
+              </button>
+              <button onClick={handleExport} className="btn btn-secondary" style={{ marginRight: '1rem' }}>
+                {tr('📦 导出 ZIP', '📦 Export ZIP')}
+              </button>
+            </>
           )}
           {step !== 'upload' && (
             <button onClick={handleRestart} className="btn btn-ghost">
@@ -675,12 +817,14 @@ export default function App() {
           {['upload', 'indexing', 'planning', 'executing'].map((s, i) => {
             const labels = ['上传', '索引', '规划', '工作台'];
             const icons = ['📁', '🔍', '📋', '💻'];
-            const currentIdx = ['upload', 'indexing', 'planning', 'executing'].indexOf(step);
+            const navSteps: AppStep[] = ['upload', 'indexing', 'planning', 'executing'];
+            const currentStepForNav: AppStep = step === 'branching' ? 'executing' : step;
+            const currentIdx = navSteps.indexOf(currentStepForNav);
             return (
               <div key={s}
-                className={`step-item ${s === step ? 'active' : ''} ${i < currentIdx ? 'passed' : ''}`}
-                onClick={() => (i <= currentIdx || s === step) && setStep(s as AppStep)}
-                style={{ cursor: (i <= currentIdx || s === step) ? 'pointer' : 'default' }}>
+                className={`step-item ${s === currentStepForNav ? 'active' : ''} ${i < currentIdx ? 'passed' : ''}`}
+                onClick={() => (i <= currentIdx || s === currentStepForNav) && setStep(navSteps[i])}
+                style={{ cursor: (i <= currentIdx || s === currentStepForNav) ? 'pointer' : 'default' }}>
                 <span>{icons[i]}</span>
                 <span>{lang === 'en' ? ['Upload', 'Index', 'Plan', 'Workbench'][i] : labels[i]}</span>
               </div>
@@ -790,6 +934,20 @@ export default function App() {
                 </p>
               </div>
               <button onClick={() => setAutoSplit(!autoSplit)} className={`toggle-btn ${autoSplit ? 'active' : ''}`}>
+                <span className="toggle-knob" />
+              </button>
+            </div>
+
+            <div className="auto-split-toggle">
+              <div>
+                <h4>{tr('启用角色改名流水线', 'Enable character renaming')}</h4>
+                <p>
+                  {remapCharacters
+                    ? tr('在生成后统一按映射表替换角色名字', 'After generation, automatically apply the character map to rename characters')
+                    : tr('直接使用原始名字，不做统一改名', 'Use original names without the rename pipeline')}
+                </p>
+              </div>
+              <button onClick={() => setRemapCharacters(!remapCharacters)} className={`toggle-btn ${remapCharacters ? 'active' : ''}`}>
                 <span className="toggle-knob" />
               </button>
             </div>
@@ -976,6 +1134,92 @@ export default function App() {
               )}
             </div>
 
+            {/* Character map editor */}
+            <div
+              className="character-map-panel"
+              style={{
+                marginTop: '0.75rem',
+                marginBottom: '0.75rem',
+                padding: '0.75rem 0.85rem',
+                borderRadius: '0.5rem',
+                border: '1px solid var(--gray-200)',
+                background: '#f9fafb',
+              }}
+            >
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: '0.25rem' }}>
+                <h3 style={{ fontSize: '0.95rem', fontWeight: 600 }}>
+                  {tr('角色映射（原名 → 新名）', 'Character mapping (original → new)')}
+                </h3>
+                <span style={{ fontSize: '0.75rem', color: 'var(--gray-500)', borderRadius: '999px', padding: '0.05rem 0.5rem', border: '1px solid var(--gray-200)', background: 'white' }}>
+                  {tr('共 ', 'Total ')}{Object.keys(characterMap).length}{tr(' 条', ' mappings')}
+                </span>
+              </div>
+              <p style={{ fontSize: '0.8rem', color: 'var(--gray-500)', marginBottom: '0.5rem' }}>
+                {tr('索引阶段自动生成的角色改名规则，可在此微调。', 'Auto-generated rename rules from indexing; you can tweak them here.')}
+              </p>
+              <div style={{ maxHeight: '190px', overflowY: 'auto', borderRadius: '0.35rem', border: '1px solid var(--gray-200)', padding: '0.5rem', background: 'white' }}>
+                {Object.keys(characterMap).length === 0 ? (
+                  <div style={{ fontSize: '0.8rem', color: 'var(--gray-400)' }}>
+                    {tr('暂无角色映射，可能索引阶段未识别到角色。', 'No character mappings yet; indexing may not have detected characters.')}
+                  </div>
+                ) : (
+                  Object.entries(characterMap).map(([from, to]) => (
+                    <div
+                      key={from}
+                      style={{
+                        display: 'grid',
+                        gridTemplateColumns: 'minmax(0, 0.45fr) auto minmax(0, 1fr)',
+                        alignItems: 'center',
+                        columnGap: '0.35rem',
+                        marginBottom: '0.25rem',
+                      }}
+                    >
+                      <span style={{ fontSize: '0.8rem', color: 'var(--gray-600)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{from}</span>
+                      <span style={{ fontSize: '0.8rem', color: 'var(--gray-400)', textAlign: 'center' }}>→</span>
+                      <input
+                        value={to}
+                        onChange={(e) => {
+                          const value = e.target.value;
+                          setCharacterMap(prev => ({ ...prev, [from]: value }));
+                        }}
+                        style={{
+                          width: '100%',
+                          padding: '0.15rem 0.25rem',
+                          fontSize: '0.8rem',
+                          border: '1px solid var(--gray-200)',
+                          borderRadius: '0.25rem',
+                        }}
+                      />
+                    </div>
+                  ))
+                )}
+              </div>
+              <button
+                onClick={async () => {
+                  if (!sessionId) return;
+                  setError(null);
+                  try {
+                    const res = await fetch(`${API_BASE}/api/sessions/${sessionId}`, {
+                      method: 'PATCH',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ characterMap }),
+                    });
+                    if (!res.ok) {
+                      const data = await res.json();
+                      throw new Error(data.error || tr('保存角色映射失败', 'Failed to save character map'));
+                    }
+                    addLog('log', tr('已保存角色映射', 'Character map saved'));
+                  } catch (e: any) {
+                    setError(e.message);
+                  }
+                }}
+                className="btn btn-ghost"
+                style={{ marginTop: '0.5rem', fontSize: '0.8rem' }}
+              >
+                {tr('💾 保存角色映射', '💾 Save character map')}
+              </button>
+            </div>
+
             {/* Mode Selection */}
             <div className="plan-controls">
               <div className="mode-selector">
@@ -1019,9 +1263,20 @@ export default function App() {
                   className="textarea compact" rows={1} style={{ minHeight: '40px', fontSize: '0.9rem' }} />
               </div>
 
-              <button onClick={handleRerollPlan} disabled={loading || isPlanning} className="btn btn-ghost">
-                {tr('🎲 重新规划', '🎲 Re-plan')}
-              </button>
+              <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+                <button onClick={handleRerollPlan} disabled={loading || isPlanning} className="btn btn-ghost">
+                  {tr('🎲 重新规划', '🎲 Re-plan')}
+                </button>
+                <button
+                  onClick={handleAdjustPlan}
+                  disabled={loading || isPlanning || isAdjustingPlan || events.length === 0}
+                  className="btn btn-ghost"
+                >
+                  {isAdjustingPlan
+                    ? tr('🦋 微调中...', '🦋 Adjusting...')
+                    : tr('🦋 蝴蝶效应微调', '🦋 Butterfly tweak')}
+                </button>
+              </div>
             </div>
 
             {/* Events List */}
@@ -1084,31 +1339,118 @@ export default function App() {
         )}
 
         {/* AGENT IDE (Unified Executing View) */}
-        {step === 'executing' && (
+        {(step === 'executing' || step === 'branching') && (
           <div className="ide-view" style={{ display: 'grid', gridTemplateColumns: '250px 1fr 300px', gap: '1rem', height: 'calc(100vh - 140px)', padding: '1rem' }}>
 
-            {/* Left: Node List */}
-            <div className="ide-sidebar" style={{ background: 'white', borderRadius: '0.5rem', border: '1px solid var(--gray-200)', overflowY: 'auto', display: 'flex', flexDirection: 'column' }}>
-              <div style={{ padding: '0.75rem', borderBottom: '1px solid var(--gray-200)', fontWeight: '600' }}>
-                {tr('节点列表', 'Node list')} ({completedNodes}/{nodes.length})
+          {/* Left: Node List */}
+          <div className="ide-sidebar" style={{ background: 'white', borderRadius: '0.5rem', border: '1px solid var(--gray-200)', overflowY: 'auto', display: 'flex', flexDirection: 'column' }}>
+            <div style={{ padding: '0.75rem', borderBottom: '1px solid var(--gray-200)', fontWeight: '600', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <span>{tr('节点列表', 'Node list')} ({completedNodes}/{nodes.length})</span>
+              <div style={{ display: 'flex', gap: '0.25rem', padding: '0.1rem', borderRadius: '999px', background: '#eef2ff' }}>
+                <button
+                  className={`btn-tab ${nodeViewMode === 'main' ? 'active' : ''}`}
+                  onClick={() => setNodeViewMode('main')}
+                  style={{
+                    fontSize: '0.75rem',
+                    padding: '0.15rem 0.6rem',
+                    borderRadius: '999px',
+                    border: 'none',
+                    background: nodeViewMode === 'main' ? 'white' : 'transparent',
+                    color: nodeViewMode === 'main' ? '#111827' : '#6b7280',
+                  }}
+                >
+                  {tr('主线', 'Main')}
+                </button>
+                <button
+                  className={`btn-tab ${nodeViewMode === 'branch' ? 'active' : ''}`}
+                  onClick={() => setNodeViewMode('branch')}
+                  style={{
+                    fontSize: '0.75rem',
+                    padding: '0.15rem 0.6rem',
+                    borderRadius: '999px',
+                    border: 'none',
+                    background: nodeViewMode === 'branch' ? 'white' : 'transparent',
+                    color: nodeViewMode === 'branch' ? '#111827' : '#6b7280',
+                  }}
+                >
+                  {tr('支线', 'Branch')}
+                </button>
               </div>
-              <div className="node-list">
-                {nodes.map(node => (
-                  <div key={node.id}
-                    className={`exec-node ${node.status} ${selectedNodeId === node.id ? 'selected' : ''}`}
-                    onClick={() => setSelectedNodeId(node.id)}
-                    style={{ padding: '0.75rem', borderBottom: '1px solid var(--gray-100)', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '0.5rem', background: selectedNodeId === node.id ? '#eff6ff' : node.status === 'generating' ? '#fef3c7' : 'white' }}
-                  >
-                    <span style={{ fontSize: '0.8rem', color: 'var(--gray-500)' }}>#{node.id}</span>
-                    <span style={{ flex: 1, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', fontSize: '0.85rem' }}>
-                      {node.type === 'highlight' ? '🌟' : '📄'} {node.description.slice(0, 10)}
-                    </span>
-                    {typeof node.qualityScore === 'number' && (
-                      <span style={{ fontSize: '0.75rem', color: 'var(--gray-400)' }}>★{node.qualityScore}</span>
-                    )}
-                    <span>{node.status === 'completed' ? '✅' : node.status === 'generating' ? '⏳' : '○'}</span>
-                  </div>
-                ))}
+            </div>
+            <div className="node-list">
+              {nodes
+                .filter(node => (nodeViewMode === 'main' ? !node.branchKind : !!node.branchKind))
+                .map(node => {
+                  const isBranch = !!node.branchKind;
+                  const icon = isBranch
+                    ? node.branchKind === 'divergent'
+                      ? '🧬'
+                      : '🌿'
+                    : node.type === 'highlight'
+                      ? '🌟'
+                      : '📄';
+
+                  return (
+                    <div
+                      key={node.id}
+                      className={`exec-node ${node.status} ${selectedNodeId === node.id ? 'selected' : ''}`}
+                      onClick={() => setSelectedNodeId(node.id)}
+                      style={{
+                        padding: '0.75rem',
+                        borderBottom: '1px solid var(--gray-100)',
+                        cursor: 'pointer',
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '0.5rem',
+                        background:
+                          selectedNodeId === node.id
+                            ? '#eff6ff'
+                            : node.status === 'generating'
+                              ? '#fef3c7'
+                              : 'white',
+                      }}
+                    >
+                      <span style={{ fontSize: '0.8rem', color: 'var(--gray-500)' }}>#{node.id}</span>
+                      <span
+                        style={{
+                          flex: 1,
+                          whiteSpace: 'nowrap',
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                          fontSize: '0.85rem',
+                        }}
+                      >
+                        {icon} {node.description.slice(0, 10)}
+                        {isBranch && node.parentNodeId && (
+                          <span
+                            style={{
+                              marginLeft: '0.25rem',
+                              fontSize: '0.7rem',
+                              color: 'var(--gray-400)',
+                            }}
+                          >
+                            {node.branchKind === 'convergent'
+                              ? tr(
+                                  `支线 ${node.parentNodeId}→${node.returnToNodeId ?? '?'}`,
+                                  `Br ${node.parentNodeId}→${node.returnToNodeId ?? '?'}`,
+                                )
+                              : tr(`分支自 #${node.parentNodeId}`, `from #${node.parentNodeId}`)}
+                          </span>
+                        )}
+                      </span>
+                      {typeof node.qualityScore === 'number' && (
+                        <span style={{ fontSize: '0.75rem', color: 'var(--gray-400)' }}>★{node.qualityScore}</span>
+                      )}
+                      <span>
+                        {node.status === 'completed'
+                          ? '✅'
+                          : node.status === 'generating'
+                            ? '⏳'
+                            : '○'}
+                      </span>
+                    </div>
+                  );
+                })}
               </div>
             </div>
 

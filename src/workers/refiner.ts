@@ -115,20 +115,13 @@ export async function processReviewingJob(job: Job<ReviewingJobData>): Promise<v
             // Parse response
             const result = tryParseJson(response, ReviewResponseSchema);
 
+            let score: number;
+            let issues: string[] = [];
+
             if (result.success) {
                 const review = result.data;
-
-                // Update node with quality score
-                nodes[String(node.id)] = {
-                    ...nodes[String(node.id)],
-                    qualityScore: review.score,
-                };
-
-                reviews.push({
-                    nodeId: node.id,
-                    score: review.score,
-                    issues: review.issues,
-                });
+                score = review.score;
+                issues = review.issues;
 
                 await publishEvent(channel, {
                     type: 'log',
@@ -144,43 +137,63 @@ export async function processReviewingJob(job: Job<ReviewingJobData>): Promise<v
                     ),
                     data: { nodeId: node.id, score: review.score },
                 });
-
-                // Auto-fix if enabled and score is low
-                const rerollCount = (nodes[String(node.id)] as any).rerollCount || 0;
-
-                if (autoFix && review.score <= 3 && rerollCount < 3) {
-                    await publishEvent(channel, {
-                        type: 'thought',
-                        message: `Score ${review.score} too low. Triggering auto re-roll (attempt ${rerollCount + 1}/3)...`,
-                        data: { nodeId: node.id },
-                    });
-
-                    // Reset node status
-                    nodes[String(node.id)] = {
-                        ...nodes[String(node.id)],
-                        status: 'generating',
-                        content: '',
-                        // @ts-ignore
-                        rerollCount: rerollCount + 1,
-                    };
-
-                    // Trigger re-roll job (add to generating queue)
-                    const { queues } = await import('../lib/queue.js');
-                    await queues.generating.add('reroll', {
-                        sessionId,
-                        taskId,
-                        nodeId: node.id,
-                        autoReview: true, // Recurse
-                    });
-
-                    await publishEvent(channel, {
-                        type: 'reroll',
-                        message: `Node ${node.id} re-rolling...`,
-                        data: { nodeId: node.id },
-                    });
-                }
             } else {
                 console.warn(`Failed to parse review for node ${node.id}`);
+                // Fallback: assign a neutral score so the node is not left unscored
+                score = 3;
+
+                await publishEvent(channel, {
+                    type: 'log',
+                    message: `Node ${node.id} review parse failed, assigning fallback score ${score}/5`,
+                    data: { nodeId: node.id },
+                });
+            }
+
+            // Update node with quality score
+            nodes[String(node.id)] = {
+                ...nodes[String(node.id)],
+                qualityScore: score,
+            } as any;
+
+            reviews.push({
+                nodeId: node.id,
+                score,
+                issues,
+            });
+
+            // Auto-fix if enabled and score is low
+            const rerollCount = (nodes[String(node.id)] as any).rerollCount || 0;
+
+            if (autoFix && score <= 3 && rerollCount < 3) {
+                await publishEvent(channel, {
+                    type: 'thought',
+                    message: `Score ${score} too low. Triggering auto re-roll (attempt ${rerollCount + 1}/3)...`,
+                    data: { nodeId: node.id },
+                });
+
+                // Reset node status
+                nodes[String(node.id)] = {
+                    ...nodes[String(node.id)],
+                    status: 'generating',
+                    content: '',
+                    // @ts-ignore
+                    rerollCount: rerollCount + 1,
+                };
+
+                // Trigger re-roll job (add to generating queue)
+                const { queues } = await import('../lib/queue.js');
+                await queues.generating.add('reroll', {
+                    sessionId,
+                    taskId,
+                    nodeId: node.id,
+                    autoReview: true, // Recurse
+                });
+
+                await publishEvent(channel, {
+                    type: 'reroll',
+                    message: `Node ${node.id} re-rolling...`,
+                    data: { nodeId: node.id },
+                });
             }
         } catch (error) {
             console.error(`Error reviewing node ${node.id}:`, error);

@@ -1,0 +1,42 @@
+[
+  {
+    "id": 1,
+    "type": "normal",
+    "endChapter": 1,
+    "sceneCount": 1,
+    "description": "Aves从噩梦中惊醒，在哥哥Zach的安抚下恢复。她的日常生活展现了与过度保护的哥哥们（Zach, Hunter, Xavier）的持续冲突，因穿着问题被Xavier强制命令更换。上学后，她与男友Jason保持距离，担心被哥哥们发现。全章刻画了她在家庭控制下的压抑、个人生活的挣扎，以及长期受噩梦困扰的暗示。Categorized as [Normal] because it establishes the status quo, character relationships, and core conflict (overprotection vs. independence) through daily scenes—a quantitative accumulation of atmosphere and setup.",
+    "startChapter": 1
+  },
+  {
+    "id": 2,
+    "type": "highlight",
+    "endChapter": 2,
+    "sceneCount": 1,
+    "description": "Aves和Summer成功说服Xavier同意举办生日派对。在紧张的家庭晚餐上，两人向所有兄长宣布各自有男朋友（Aves与Jason，Summer与Asher），引发兄长们（尤其是Xavier, Aiden, Tristan）的震惊、质疑和强烈反对，家庭气氛瞬间降至冰点并爆发冲突。Categorized as [Highlight/Split] because this event marks an irreversible qualitative shift: the secret relationships are revealed, directly challenging the brothers' control and triggering open, high-tension family conflict. It is a point of no return for Aves's personal life.",
+    "startChapter": 2
+  },
+  {
+    "id": 3,
+    "type": "highlight",
+    "endChapter": 3,
+    "sceneCount": 1,
+    "description": "Aves和Summer带男友Jason和Asher正式见面，遭遇兄长们集体组织的、充满压迫感和羞辱性的‘审讯’晚宴。从盘问隐私到展示童年尴尬照片，气氛极度紧张。晚宴后，年长的哥哥们（Xavier, Hunter, Tristan, Aiden）因一通紧急电话匆忙离开，行色可疑，留下悬念。Categorized as [Highlight] because it is the climax of the conflict triggered in Chapter 2—the direct confrontation between the boyfriends and the protective brothers. The brothers' departure under mysterious circumstances adds a new layer of family secrecy, further altering the story's dynamics.",
+    "startChapter": 3
+  },
+  {
+    "id": 4,
+    "type": "highlight",
+    "endChapter": 4,
+    "sceneCount": 1,
+    "description": "Aves庆祝18岁生日，从清晨到傍晚经历温馨祝福、尴尬有趣的礼物环节（包括收到母亲遗物手链和Aiden的项链带来的情感触动），最终盛装准备参加在家举办的盛大生日派对。Categorized as [Highlight] because the 18th birthday is a major life milestone and a key narrative promise. The receipt of the mother's heirloom is a significant emotional and plot development, deepening character backstory and connections. It serves as the calm before the storm of the party night.",
+    "startChapter": 4
+  },
+  {
+    "id": 5,
+    "type": "highlight",
+    "endChapter": 5,
+    "sceneCount": 1,
+    "description": "在喧闹的生日派对上，Aves与醉酒越界的男友Jason互动时，被Aiden强行拽离舞池。在黑暗的二楼走廊，Aiden质问Aves后突然强吻了她，引发Aves巨大的内心混乱、羞愧和自我怀疑。这一吻彻底搅乱了人物关系。Categorized as [Highlight/Split] because this event is a massive, irreversible qualitative change: it introduces a forbidden romantic tension within the family circle (Aiden), shatters Aves's existing relationship dynamic, and creates profound internal conflict, marking a definitive turning point in the emotional core of the story.",
+    "startChapter": 5
+  }
+]

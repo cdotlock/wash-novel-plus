@@ -13,6 +13,7 @@ const StartGeneratingSchema = z.object({
     nodeId: z.number().optional(), // Regenerate specific node
     startFromNode: z.number().optional(), // Resume from node
     autoReview: z.boolean().optional(), // Enable auto review loop
+    remapCharacters: z.boolean().optional(), // Enable character renaming pipeline
 });
 
 export async function generatingRoutes(app: FastifyInstance): Promise<void> {
@@ -26,7 +27,7 @@ export async function generatingRoutes(app: FastifyInstance): Promise<void> {
             // Check session is confirmed
             const session = await prisma.session.findUnique({
                 where: { id },
-                select: { id: true, planConfirmed: true, nodes: true },
+                select: { id: true, planConfirmed: true, nodes: true, contentAnalysis: true },
             });
 
             if (!session) {
@@ -40,6 +41,24 @@ export async function generatingRoutes(app: FastifyInstance): Promise<void> {
             const nodes = parseJsonField<Record<string, unknown>>(session.nodes, {});
             if (Object.keys(nodes).length === 0) {
                 return reply.status(400).send({ error: 'No nodes to generate' });
+            }
+
+            // Persist remapCharacters preference so other workers (e.g. Brancher)
+            // can respect the same setting later.
+            const remapCharacters = body.remapCharacters ?? false;
+            try {
+                const analysis = parseJsonField<Record<string, any>>(
+                    // contentAnalysis may be stored as JSON or string; normalize here
+                    (session as any).contentAnalysis ?? {},
+                    {},
+                );
+                const nextAnalysis = { ...analysis, remapCharacters };
+                await prisma.session.update({
+                    where: { id },
+                    data: { contentAnalysis: nextAnalysis },
+                });
+            } catch {
+                // best-effort only; do not block generation if this fails
             }
 
             // Create task
@@ -60,6 +79,7 @@ export async function generatingRoutes(app: FastifyInstance): Promise<void> {
                 startFromNode: body.startFromNode,
                 model: body.model,
                 autoReview: body.autoReview,
+                remapCharacters: body.remapCharacters,
             };
 
             const job = await queues.generating.add(QUEUE_NAMES.GENERATING, jobData, {

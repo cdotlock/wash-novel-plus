@@ -12,3 +12,4 @@ export { controlRoutes } from './control.js';
 export { exportRoutes } from './export.js';
 export { configRoutes } from './config.js';
 export { reviewRoutes } from './review.js';
+export { branchingRoutes } from './branching.js';

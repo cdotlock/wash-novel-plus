@@ -9,7 +9,8 @@ import { processIndexingJob } from './indexer.js';
 import { processPlanningJob } from './planner.js';
 import { processGeneratingJob } from './writer.js';
 import { processReviewingJob } from './refiner.js';
-import { IndexingJobData, PlanningJobData, GeneratingJobData, ReviewingJobData } from '../lib/queue.js';
+import { processBranchingJob } from './brancher.js';
+import { IndexingJobData, PlanningJobData, GeneratingJobData, ReviewingJobData, BranchingJobData } from '../lib/queue.js';
 
 console.log('🚀 Starting Wash 2.0 Workers...');
 
@@ -44,8 +45,14 @@ const reviewingWorker = createWorker<ReviewingJobData>(
     { concurrency: config.worker.concurrencyReview }
 );
 
+const branchingWorker = createWorker<BranchingJobData>(
+    QUEUE_NAMES.BRANCHING,
+    processBranchingJob,
+    { concurrency: 1 }
+);
+
 // Log worker events (keep this minimal: only failures & stalls by default)
-const workers = [indexingWorker, planningWorker, generatingWorker, reviewingWorker];
+const workers = [indexingWorker, planningWorker, generatingWorker, reviewingWorker, branchingWorker];
 
 workers.forEach((worker) => {
     worker.on('failed', (job, error) => {
@@ -62,6 +69,7 @@ console.log(`   - Indexing: concurrency ${config.worker.concurrencyIndex}`);
 console.log('   - Planning: concurrency 3');
 console.log(`   - Generating: concurrency ${config.worker.concurrencyGenerate}`);
 console.log(`   - Reviewing: concurrency ${config.worker.concurrencyReview}`);
+console.log('   - Branching: concurrency 1');
 
 // Graceful shutdown
 const shutdown = async (signal: string) => {

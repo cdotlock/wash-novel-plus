@@ -19,7 +19,7 @@ model Session {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  // Large data stored as JSONB for better query performance
+  // Large data stored as JSONB for better query performance (legacy fields)
   chapters        Json    @default("{}")  // Record<number, Chapter>
   chapterIndex    Json    @default("[]")  // ChapterIndex[]
   planEvents      Json    @default("[]")  // EventPlan[]
@@ -30,8 +30,16 @@ model Session {
   globalMemory    String  @default("")
   contentAnalysis Json    @default("{}")
 
+  // [Upgrade 1] AI-normalized character mapping table
+  // Example: { "叶凡": "韩立", "庞博": "厉飞雨" }
+  characterMap    Json?
+
   // Relations
-  tasks Task[]
+  tasks          Task[]
+  chapterRecords Chapter[]
+  nodeRecords    Node[]
+  memoryLogs     MemoryLog[]
+  rawCharacters  RawCharacterLog[]
 
   @@index([status])
   @@index([createdAt])
@@ -83,4 +91,82 @@ model TaskEvent {
   createdAt DateTime @default(now())
 
   @@index([taskId, createdAt])
+}
+
+// Chapter records (normalized chapters per session)
+model Chapter {
+  id        Int      @id @default(autoincrement())
+  sessionId String
+  number    Int
+  title     String
+  content   String   @db.Text
+
+  session Session @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@unique([sessionId, number])
+  @@index([sessionId, number])
+}
+
+// Node: tree-structured narrative nodes (main line + branches)
+model Node {
+  id        Int      @id @default(autoincrement())
+  sessionId String
+
+  // Node type: "main" (主线), "branch_body" (支线过程), "branch_end" (支线结局)
+  type       String   @default("main")
+  nodeIndex  Int      // order within its line
+  title      String?
+  description String   @default("")
+  content    String   @db.Text // final generated Markdown
+
+  // Optional link back to original chapter range for this node
+  startChapter Int?
+  endChapter   Int?
+
+  // Branching metadata
+  parentId       Int?     // fork point: which node this one branched from
+  returnToNodeId Int?     // convergence point for return branches
+  branchReason   String?  // explanation / condition for entering this branch
+
+  // Execution state
+  status       String   @default("pending")
+  qualityScore Int?
+
+  session   Session    @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  memories  MemoryLog[]
+
+  @@index([sessionId, nodeIndex])
+}
+
+// Append-only memory log for sliding-window context
+model MemoryLog {
+  id        Int      @id @default(autoincrement())
+  sessionId String
+  nodeId    Int?     // optional: node that produced this memory
+
+  content    String   @db.Text // memory payload
+  type       String   // e.g. "summary" | "item" | "relation"
+  importance Int      @default(1) // weight 1-5
+
+  createdAt DateTime @default(now())
+
+  session Session @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  node    Node?   @relation(fields: [nodeId], references: [id])
+
+  @@index([sessionId, createdAt])
+}
+
+// Raw character appearances extracted during indexing
+model RawCharacterLog {
+  id            Int      @id @default(autoincrement())
+  sessionId     String
+  chapterNumber Int
+  name          String
+  role          String?
+  aliases       Json?
+
+  session Session @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([sessionId, name])
+  @@index([sessionId, chapterNumber])
 }

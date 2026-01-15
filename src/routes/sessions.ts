@@ -15,6 +15,7 @@ const CreateSessionSchema = z.object({
 const UpdateSessionSchema = z.object({
     name: z.string().min(1).max(200).optional(),
     status: SessionStatusSchema.optional(),
+    characterMap: z.record(z.string(), z.string()).optional(),
 });
 
 export async function sessionRoutes(app: FastifyInstance): Promise<void> {
@@ -61,6 +62,7 @@ export async function sessionRoutes(app: FastifyInstance): Promise<void> {
             planEvents: parseJsonField(session.planEvents, []),
             nodes: parseJsonField(session.nodes, {}),
             contentAnalysis: parseJsonField(session.contentAnalysis, {}),
+            characterMap: parseJsonField((session as any).characterMap, {}),
         };
     });
 

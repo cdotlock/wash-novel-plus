@@ -23,9 +23,14 @@ export const PROMPT_NAMES = {
     PLANNING_SPLIT: 'wash-planning-split',
     PLANNING_MERGE: 'wash-planning-merge',
     PLANNING_ADJUST: 'wash-planning-adjust',
+    PLANNING_BUTTERFLY: 'wash-planning-butterfly',
     WASH_GENERATE: 'wash-generate',
     WASH_MEMORY: 'wash-memory',
     REVIEW: 'wash-review',
+    CHARACTER_MAP: 'wash-characters',
+    BRANCH_PLAN: 'wash-branch-plan',
+    BRANCH_WRITE: 'wash-branch-write',
+    RENAME_NODE: 'wash-rename-node',
 } as const;
 
 // Cache for prompts (5 min TTL)
@@ -98,15 +103,31 @@ export async function getPlanningPrompt(vars: {
 /**
  * Get planning adjustment prompt
  * 用于在初次规划后，根据目标节点数对 events 进行智能合并/拆分。
+ *
+ * 注意：currentEvents 以 JSON 字符串形式传入，便于在 Prompt 中直接展示。
  */
 export async function getPlanningAdjustPrompt(vars: {
     mode: 'auto' | 'split' | 'merge';
     chapterSummaries: string;
-    currentEvents: any[];
+    currentEvents: string; // JSON.stringify(events)
     targetNodeCount: number;
     language?: 'cn' | 'en';
 }): Promise<string | any[]> {
     return getPrompt(PROMPT_NAMES.PLANNING_ADJUST, vars);
+}
+
+/**
+ * Get butterfly-effect micro-tuning prompt for existing plans
+ * 只做细微偏差，保持整体章节覆盖和节奏基本一致。
+ */
+export async function getPlanningButterflyPrompt(vars: {
+    mode: 'auto' | 'split' | 'merge';
+    chapterSummaries: string;
+    currentEvents: string; // JSON.stringify(events)
+    targetNodeCount: number;
+    language?: 'cn' | 'en';
+}): Promise<string | any[]> {
+    return getPrompt(PROMPT_NAMES.PLANNING_BUTTERFLY, vars);
 }
 
 /**
@@ -133,6 +154,54 @@ export async function getMemoryPrompt(vars: {
     language: 'cn' | 'en';
 }): Promise<string | any[]> {
     return getPrompt(PROMPT_NAMES.WASH_MEMORY, vars);
+}
+
+/**
+ * Get character map consolidation prompt
+ */
+export async function getCharacterMapPrompt(vars: {
+    charactersJson: string;
+    language?: 'cn' | 'en';
+}): Promise<string | any[]> {
+    return getPrompt(PROMPT_NAMES.CHARACTER_MAP, vars);
+}
+
+/**
+ * Get branch planning prompt (decide divergent vs convergent branches)
+ */
+export async function getBranchPlanPrompt(vars: {
+    mainSummary: string;
+    targetDivergent: number;
+    targetConvergent: number;
+    language?: 'cn' | 'en';
+}): Promise<string | any[]> {
+    return getPrompt(PROMPT_NAMES.BRANCH_PLAN, vars);
+}
+
+/**
+ * Get branch writing prompt (generate a single branch node)
+ */
+export async function getBranchWritePrompt(vars: {
+    fromNodeId: number;
+    baseDescription: string;
+    mainSnippet: string;
+    branchType: 'divergent' | 'convergent';
+    returnSnippet?: string;
+    language?: 'cn' | 'en';
+}): Promise<string | any[]> {
+    return getPrompt(PROMPT_NAMES.BRANCH_WRITE, vars);
+}
+
+/**
+ * Get node rename prompt (post-processing character renaming)
+ */
+export async function getRenameNodePrompt(vars: {
+    nodeId: number;
+    originalContent: string;
+    characterMapJson: string;
+    language?: 'cn' | 'en';
+}): Promise<string | any[]> {
+    return getPrompt(PROMPT_NAMES.RENAME_NODE, vars);
 }
 
 /**

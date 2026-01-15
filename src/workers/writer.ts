@@ -6,19 +6,20 @@ import { Job } from 'bullmq';
 import { prisma } from '../lib/prisma.js';
 import { redis, publishEvent, channels } from '../lib/redis.js';
 import { chatWithRetry, getModel, MODEL_ROUTER, TOKEN_LIMITS } from '../lib/llm.js';
-import { getWashPrompt, getMemoryPrompt } from '../lib/langfuse.js';
+import { getWashPrompt, getMemoryPrompt, getRenameNodePrompt } from '../lib/langfuse.js';
 import { cleanMarkdownCodeBlock, parseJsonField } from '../lib/json-utils.js';
 import { GeneratingJobData } from '../lib/queue.js';
 import { Chapter } from '../schemas/session.js';
 import { Node } from '../schemas/node.js';
 import { config } from '../config/index.js';
+import { appendMemoryEntry, getMemoryContext } from '../lib/memory.js';
 
 // Bilingual message helper
 const isCn = () => config.novelLanguage === 'cn';
 const tr = (cn: string, en: string) => isCn() ? cn : en;
 
 export async function processGeneratingJob(job: Job<GeneratingJobData>): Promise<void> {
-    const { sessionId, taskId, nodeId, startFromNode, model } = job.data;
+    const { sessionId, taskId, nodeId, startFromNode, model, remapCharacters } = job.data;
     const channel = channels.jobEvents(taskId);
 
     console.log(`\n✍️  [Writer] Starting job for session: ${sessionId.slice(0, 8)}...`);
@@ -35,7 +36,20 @@ export async function processGeneratingJob(job: Job<GeneratingJobData>): Promise
 
     const chapters = parseJsonField<Record<string, Chapter>>(session.chapters, {});
     const nodes = parseJsonField<Record<string, Node>>(session.nodes, {});
-    let globalMemory = session.globalMemory || '';
+
+    const characterMap = parseJsonField<Record<string, string>>(
+        // characterMap may be stored as JSON or string; normalize here
+        (session as any).characterMap ?? {},
+        {},
+    );
+
+    // Sliding-window memory context based on MemoryLog (append-only)
+    let globalMemory = await getMemoryContext(sessionId);
+
+    // For backward compatibility, also fall back to legacy globalMemory if no logs yet
+    if (!globalMemory && session.globalMemory) {
+        globalMemory = session.globalMemory;
+    }
 
     await publishEvent(channel, {
         type: 'thought',
@@ -145,7 +159,7 @@ export async function processGeneratingJob(job: Job<GeneratingJobData>): Promise
             const chapterContent = buildChapterContent(chapters, node.startChapter, node.endChapter);
             const choiceCount = node.type === 'highlight' ? 3 : 1;
 
-            const washPrompt = await getWashPrompt({
+            let washPrompt: any = await getWashPrompt({
                 nodeType: node.type,
                 nodeId: node.id,
                 nodeDescription: node.description,
@@ -162,13 +176,66 @@ export async function processGeneratingJob(job: Job<GeneratingJobData>): Promise
 
             const cleanedContent = cleanMarkdownCodeBlock(content);
 
+            // Optional Stage 1.5: post-processing character renaming
+            const shouldRemap = !!remapCharacters && Object.keys(characterMap || {}).length > 0;
+            let finalContent = cleanedContent;
+
+            if (shouldRemap) {
+                await publishEvent(channel, {
+                    type: 'thought',
+                    message: tr(
+                        `[Rename] 正在根据角色映射表重写节点 #${node.id} 的名字…`,
+                        `[Rename] Applying character rename pipeline for node #${node.id}…`
+                    ),
+                    data: { nodeId: node.id, characterMapSize: Object.keys(characterMap || {}).length },
+                });
+
+                try {
+                    const renamePrompt = await getRenameNodePrompt({
+                        nodeId: node.id,
+                        originalContent: cleanedContent,
+                        characterMapJson: JSON.stringify(characterMap, null, 2),
+                        language: config.novelLanguage as 'cn' | 'en',
+                    });
+
+                    const renamed = await chatWithRetry(renamePrompt, {
+                        model: getModel('chat'),
+                        maxTokens: TOKEN_LIMITS.writer,
+                    });
+
+                    finalContent = cleanMarkdownCodeBlock(renamed);
+
+                    await publishEvent(channel, {
+                        type: 'thought',
+                        message: tr(
+                            `[Rename] LLM 改名完成，继续进行字符串精修替换…`,
+                            `[Rename] LLM rename pass complete, applying string-level fallback…`
+                        ),
+                        data: { nodeId: node.id },
+                    });
+                } catch (renameError) {
+                    console.warn('Character rename LLM pass failed, falling back to string replacement only:', renameError);
+                    await publishEvent(channel, {
+                        type: 'log',
+                        message: tr(
+                            `[Rename] LLM 改名失败，改为只使用字符串替换兜底。`,
+                            `[Rename] LLM rename failed, falling back to string replacement only.`,
+                        ),
+                        data: { nodeId: node.id },
+                    });
+                }
+
+                // Always apply regex / substring-based replacement as a final safety net
+                finalContent = applyCharacterMapStringReplace(finalContent, characterMap, config.novelLanguage as 'cn' | 'en');
+            }
+
             await publishEvent(channel, {
                 type: 'thought',
                 message: tr(
-                    `[Writer] 节点 #${node.id} 生成完成，${cleanedContent.length} 字。更新记忆中...`,
-                    `[Writer] Node #${node.id} complete. ${cleanedContent.length} chars. Updating memory...`
+                    `[Writer] 节点 #${node.id} 生成完成，${finalContent.length} 字。更新记忆中...`,
+                    `[Writer] Node #${node.id} complete. ${finalContent.length} chars. Updating memory...`
                 ),
-                data: { nodeId: node.id, contentLength: cleanedContent.length },
+                data: { nodeId: node.id, contentLength: finalContent.length },
             });
 
             // Stage 2: Update memory
@@ -179,7 +246,7 @@ export async function processGeneratingJob(job: Job<GeneratingJobData>): Promise
             });
 
             const memoryPrompt = await getMemoryPrompt({
-                nodeContent: cleanedContent.slice(0, 3000),
+                nodeContent: finalContent.slice(0, 3000),
                 previousMemory: globalMemory,
                 language: config.novelLanguage as 'cn' | 'en',
             });
@@ -189,24 +256,35 @@ export async function processGeneratingJob(job: Job<GeneratingJobData>): Promise
                     model: getModel('chat'), // Use faster model for memory
                     maxTokens: TOKEN_LIMITS.memory,
                 });
-                globalMemory = newMemory;
+
+                // Append new memory as a MemoryLog record (append-only)
+                await appendMemoryEntry({
+                    sessionId,
+                    nodeId: node.id,
+                    content: newMemory,
+                    type: 'summary',
+                    importance: 2,
+                });
+
+                // Refresh sliding-window context for subsequent nodes
+                globalMemory = await getMemoryContext(sessionId);
 
                 await publishEvent(channel, {
                     type: 'thought',
                     message: tr(
-                        `[Memory] 全局记忆已更新 (节点 #${node.id})`,
-                        `[Memory] Global memory updated (node #${node.id})`
+                        `[Memory] 追加式记忆已更新 (节点 #${node.id})`,
+                        `[Memory] Append-only memory updated (node #${node.id})`
                     ),
                     data: { nodeId: node.id },
                 });
             } catch (memoryError) {
-                console.warn('Memory update failed, keeping previous memory:', memoryError);
+                console.warn('Memory update failed, keeping previous memory context:', memoryError);
             }
 
-            // Update node and session
+            // Update node and session (keep legacy JSON/globalMemory for compatibility)
             nodes[String(node.id)] = {
                 ...nodes[String(node.id)],
-                content: cleanedContent,
+                content: finalContent,
                 status: 'completed',
             };
 
@@ -214,6 +292,7 @@ export async function processGeneratingJob(job: Job<GeneratingJobData>): Promise
                 where: { id: sessionId },
                 data: {
                     nodes,
+                    // Optionally keep a snapshot of latest memory window on Session for old callers
                     globalMemory,
                 },
             });
@@ -221,7 +300,7 @@ export async function processGeneratingJob(job: Job<GeneratingJobData>): Promise
             await publishEvent(channel, {
                 type: 'node_ready',
                 message: `Node ${node.id} generated`,
-                data: { nodeId: node.id, content: cleanedContent },
+                data: { nodeId: node.id, content: finalContent },
             });
 
             // Trigger Auto-Review if enabled
@@ -294,6 +373,31 @@ export async function processGeneratingJob(job: Job<GeneratingJobData>): Promise
     });
 }
 
+// String-level fallback for character renaming
+// For CN, we do simple global substring replacement (longest keys first).
+// For EN, we additionally try to respect word boundaries.
+function applyCharacterMapStringReplace(
+    content: string,
+    characterMap: Record<string, string>,
+    language: 'cn' | 'en',
+): string {
+    if (!characterMap || !Object.keys(characterMap).length) return content;
+
+    const entries = Object.entries(characterMap).sort((a, b) => b[0].length - a[0].length);
+
+    let result = content;
+    for (const [oldName, newName] of entries) {
+        if (!oldName || !newName) continue;
+        const escaped = oldName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const pattern = language === 'en'
+            ? new RegExp(`\\b${escaped}\\b`, 'g')
+            : new RegExp(escaped, 'g');
+        result = result.replace(pattern, newName);
+    }
+
+    return result;
+}
+
 // Build chapter content string
 function buildChapterContent(
     chapters: Record<string, Chapter>,
@@ -305,7 +409,10 @@ function buildChapterContent(
     for (let i = startChapter; i <= endChapter; i++) {
         const chapter = chapters[String(i)];
         if (chapter) {
-            blocks.push(`--- 第 ${chapter.number} 章: ${chapter.title} ---\n${chapter.content}`);
+            const header = isCn()
+                ? `--- 第 ${chapter.number} 章: ${chapter.title} ---`
+                : `--- Chapter ${chapter.number}: ${chapter.title} ---`;
+            blocks.push(`${header}\n${chapter.content}`);
         }
     }
 

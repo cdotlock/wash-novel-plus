@@ -18,6 +18,7 @@ import {
     exportRoutes,
     configRoutes,
     reviewRoutes,
+    branchingRoutes,
 } from './routes/index.js';
 
 // Create Fastify instance
@@ -65,6 +66,7 @@ await app.register(controlRoutes);
 await app.register(exportRoutes);
 await app.register(configRoutes);
 await app.register(reviewRoutes);
+await app.register(branchingRoutes);
 
 // Graceful shutdown
 const shutdown = async (signal: string) => {

@@ -5,7 +5,6 @@
 import { FastifyInstance } from 'fastify';
 import { prisma } from '../lib/prisma.js';
 import archiver from 'archiver';
-import { Node } from '../schemas/node.js';
 import { parseJsonField } from '../lib/json-utils.js';
 
 export async function exportRoutes(app: FastifyInstance): Promise<void> {
@@ -19,7 +18,7 @@ export async function exportRoutes(app: FastifyInstance): Promise<void> {
                 where: { id },
                 select: {
                     name: true,
-                    nodes: true
+                    nodes: true,
                 },
             });
 
@@ -27,11 +26,16 @@ export async function exportRoutes(app: FastifyInstance): Promise<void> {
                 return reply.status(404).send({ error: 'Session not found' });
             }
 
-            const nodes = parseJsonField<Record<string, Node>>(session.nodes, {});
-            const nodeList = Object.values(nodes).sort((a, b) => a.id - b.id);
+            // Parse nodes as a loose record so we can read branch metadata as well
+            const nodes = parseJsonField<Record<string, any>>(session.nodes, {});
+            const nodeList: any[] = Object.values(nodes).sort((a, b) => (a.id ?? 0) - (b.id ?? 0));
+
+            // Prepare naming helpers
+            const sessionName = session.name || 'session';
+            const novelSlug = sanitizeFilename(sessionName).toLowerCase() || 'session';
 
             // Set headers for download
-            const filename = `${session.name || 'session'}-${id.slice(0, 6)}.zip`;
+            const filename = `${sessionName}-${id.slice(0, 6)}.zip`;
             reply.header('Content-Type', 'application/zip');
             reply.header('Content-Disposition', `attachment; filename="${encodeURIComponent(filename)}"`);
 
@@ -49,14 +53,40 @@ export async function exportRoutes(app: FastifyInstance): Promise<void> {
 
             // Add files
             let hasFiles = false;
+
+            // Main-line exports: root of ZIP
             for (const node of nodeList) {
+                const isBranch = !!node.branchKind;
+                if (isBranch) continue;
+
                 if (node.status === 'completed' && node.content) {
                     const typeLabel = node.type === 'highlight' ? 'highlight' : 'normal';
-                    const shortTitle = sanitizeFilename(node.description).slice(0, 30) || typeLabel;
-                    const nodeFilename = `${String(node.id).padStart(3, '0')}_${shortTitle}_${typeLabel}.md`;
-                    archive.append(node.content, { name: nodeFilename });
+                    const index = node.id ?? 0;
+                    const base = `${index}-${typeLabel}-${novelSlug}`;
+                    const nodeFilename = `${base}.md`;
+                    archive.append(String(node.content), { name: nodeFilename });
                     hasFiles = true;
                 }
+            }
+
+            // Branch exports: put into separate folder, grouped by parent node
+            const branchCounters: Record<number, number> = {};
+            for (const node of nodeList) {
+                const isBranch = !!node.branchKind;
+                if (!isBranch) continue;
+                if (node.status !== 'completed' || !node.content) continue;
+
+                const parentId: number = Number(node.parentNodeId ?? node.id ?? 0) || 0;
+                const typeLabel = node.type === 'highlight' ? 'highlight' : 'normal';
+                const base = `${parentId}-${typeLabel}-${novelSlug}`;
+
+                branchCounters[parentId] = (branchCounters[parentId] || 0) + 1;
+                const branchIndex = branchCounters[parentId];
+
+                // Example: branches/1-highlight-novelname-branchsolo-1.md
+                const branchFilename = `branches/${base}-branchsolo-${branchIndex}.md`;
+                archive.append(String(node.content), { name: branchFilename });
+                hasFiles = true;
             }
 
             if (!hasFiles) {
