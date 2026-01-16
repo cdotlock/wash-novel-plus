@@ -732,7 +732,7 @@ export default function App() {
       // "branch workspace" even while branches are being generated.
       setStep('branching');
       setNodeViewMode('branch');
-      setThoughts([]);
+      // 不清空思考流，让主线 → 支线的上下文连续保留
       addLog('plan', tr('已启动自动支线生成任务', 'Auto-branching task started'));
     } catch (e: any) {
       setError(e.message);
