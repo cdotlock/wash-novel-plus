@@ -207,7 +207,8 @@ POST /api/sessions/:id/plan
 
 ## Langfuse Prompt 管理
 
-本仓库通过脚本 `scripts/upload_prompts.ts` 一键将所有 Prompt 上传到 Langfuse：
+本项目所有 Prompt 统一托管在 **Langfuse** 中，运行时只通过 `src/lib/langfuse.ts` 访问，
+具体使用与修改规范见 `LANGFUSE_PROMPTS.md`。
 
 ### 环境变量
 
@@ -219,43 +220,49 @@ LANGFUSE_PUBLIC_KEY=your_langfuse_public
 LANGFUSE_BASE_URL=https://cloud.langfuse.com  # 或你的自建实例
 ```
 
-### 已包含的 Prompt 列表
+### Prompt 管理脚本总览
 
-脚本会上传以下名字的 Prompt（中英双语）：
+所有 Prompt 定义集中在 `scripts/` 目录下的 TS 脚本中，并通过 `langfuse.createPrompt` 进行 upsert：
 
-- `wash-indexing-cn` / `wash-indexing-en`
-- `wash-planning-auto-cn` / `wash-planning-auto-en`
-- `wash-planning-split-cn` / `wash-planning-split-en`
-- `wash-planning-merge-cn` / `wash-planning-merge-en`
-- `wash-generate-cn` / `wash-generate-en`
-- `wash-memory-cn` / `wash-memory-en`
-- `wash-review-cn` / `wash-review-en`
+- 基础索引 / 规划 / 生成：`scripts/upload_prompts.ts`
+- 规划主流程：`scripts/upload_planning_prompts.ts`
+- 规划蝴蝶效应微调：`scripts/upload_planning_butterfly_prompts.ts`
+- Review 严格评分：`scripts/upload_review_prompts.ts`
+- 支线相关：`scripts/upload_branching_prompts.ts`
+- 角色映射：`scripts/upload_characters_prompt.ts`
+- 节点角色改名：`scripts/upload_rename_prompts.ts`
 
-> 注意：`wash-planning-adjust-{lang}` 的 Prompt 名称和调用已在后端预留，但具体模板内容需要你在 Langfuse 中创建并按上述命名约定维护（建议仿照 `wash-planning-auto` 的结构编写）。
+### 推荐工作流（非常重要）
 
-### 同步 Prompt 脚本
+1. **修改前先下载快照**：
 
-在项目根目录执行：
+   ```bash
+   cd reconstruction_project
+   npx tsx scripts/download_prompts.ts
+   ```
 
-```bash
-# 同步所有内置 Prompt（索引 / 规划 / 生成 / 记忆 / 旧版 Review）
-npx tsx scripts/upload_prompts.ts
+   生成的 `prompts_snapshot.json` 仅用于本地对比，已加入 `.gitignore`，不要提交到仓库。
 
-# 仅（重新）上传严格对齐评分 Schema 的 Review Prompt（wash-review-{lang}）
-npx tsx scripts/upload_review_prompts.ts
-```
+2. **在 `scripts/upload_*.ts` 中调整对应 Prompt 定义**（system/user/assistant 内容、config 等）。
+3. **通过脚本上传变更**，例如：
 
-成功时你会看到类似输出：
+   ```bash
+   # 更新规划相关 Prompt（wash-planning-*）
+   npx tsx scripts/upload_planning_prompts.ts
 
-```text
-🚀 Starting prompt upload to Langfuse...
-✅ Uploaded wash-indexing-cn
-✅ Uploaded wash-planning-auto-cn
-...
-✨ All done!
-```
+   # 更新支线相关 Prompt（wash-branch-plan / events / write）
+   npx tsx scripts/upload_branching_prompts.ts
 
-如果你补充了 `wash-planning-adjust-{lang}` 的模板，可以直接在脚本中追加对应条目，或单独写一个 `upload_planning_adjust.ts` 使用相同的 `Langfuse` 客户端上传。
+   # 更新 Review / 角色相关 Prompt
+   npx tsx scripts/upload_review_prompts.ts
+   npx tsx scripts/upload_characters_prompt.ts
+   npx tsx scripts/upload_rename_prompts.ts
+   ```
+
+4. **绝不在脚本中删除线上 Prompt**：如需废弃，通过 labels 或停用调用来实现。
+
+更详细的规则（只能“添加/修改”而不能整体推倒重来、禁止删除线上 Prompt 等）
+请参见根目录的 `LANGFUSE_PROMPTS.md`。
 
 ---
 

@@ -73,9 +73,10 @@
 ## 6. 配置管理
 
 * **Prompts**:
-  * 存放于 `/src/prompts/*.hbs` (Handlebars 模板)。
-  * 禁止 TS 代码硬编码 Prompt。
-  * 启动时加载到内存，支持文件热监听 (Hot Reload)。
+  * 所有 Prompt 运行时来源均为 **Langfuse**；
+  * Prompt 定义集中在 `scripts/upload_*.ts` 中，通过脚本调用 Langfuse API (`langfuse.createPrompt`) 完成新增/修改；
+  * 不再使用 `/src/prompts/*.hbs` 这类本地模板文件；
+  * 任何改动必须遵守 `LANGFUSE_PROMPTS.md` 中的「先下载快照、只做 add/modify、不删线上 Prompt」规则。
 * **Context**:
   * 使用 TS Interface 定义 Context 结构 (如 `IWorldState`, `ICharacterStatus`)。
   * 每次生成完，将 Context 存入 PG 的 `jsonb` 字段。

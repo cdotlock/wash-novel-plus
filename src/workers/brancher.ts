@@ -16,7 +16,7 @@ import {
 import { Chapter } from '../schemas/session.js';
 import { Node as JsonNode } from '../schemas/node.js';
 import { config } from '../config/index.js';
-import { getBranchPlanPrompt, getBranchWritePrompt, getRenameNodePrompt } from '../lib/langfuse.js';
+import { getBranchPlanPrompt, getBranchEventsPrompt, getBranchWritePrompt, getRenameNodePrompt } from '../lib/langfuse.js';
 
 const isCn = () => config.novelLanguage === 'cn';
 
@@ -25,6 +25,14 @@ interface BranchPlanItem {
   fromNodeId: number;
   returnNodeId?: number | null;
   summary: string;
+}
+
+interface BranchEventPlanItem {
+  eventId: number;
+  anchorMainNodeId: number;
+  title: string;
+  summary: string;
+  notes?: string;
 }
 
 export async function processBranchingJob(job: Job<BranchingJobData>): Promise<void> {
@@ -132,12 +140,42 @@ export async function processBranchingJob(job: Job<BranchingJobData>): Promise<v
 
   await publishEvent(channel, {
     type: 'thought',
-    message: `[Brancher] Planned ${planItems.length} branches. Generating branch content...`,
+    message: `[Brancher] Planned ${planItems.length} branches. Planning per-branch events and generating branch nodes...`,
   });
 
   // Determine next node id for JSON/Node table
   const existingIds = Object.keys(nodesJson).map((k) => Number(k)).filter((n) => Number.isFinite(n));
   let nextId = existingIds.length ? Math.max(...existingIds) + 1 : 1;
+
+  // Helper: build a compact main-context string focused on a window of main nodes
+  function buildMainContextAround(fromNodeId: number, returnNodeId?: number | null): string {
+    const windowSize = 3; // fromNodeId 前后各取若干个节点，给事件规划足够上下文
+    const indices = mainNodesDb.map(n => n.nodeIndex).sort((a, b) => a - b);
+    const fromIdx = indices.indexOf(fromNodeId);
+    if (fromIdx === -1) return mainSummary;
+
+    const startIdx = Math.max(0, fromIdx - windowSize);
+    let endIdx = Math.min(indices.length - 1, fromIdx + windowSize);
+
+    // 对 convergent 支线，尽量把 returnNodeId 附近也包含进来
+    if (returnNodeId && indices.includes(returnNodeId)) {
+      const retIdx = indices.indexOf(returnNodeId);
+      endIdx = Math.max(endIdx, Math.min(indices.length - 1, retIdx + 1));
+    }
+
+    const slice = indices.slice(startIdx, endIdx + 1);
+    return slice
+      .map((idx) => {
+        const dbNode = mainNodesDb.find((n) => n.nodeIndex === idx);
+        const jsonNode = nodesJson[String(idx)] as JsonNode | undefined;
+        if (!dbNode || !jsonNode) return '';
+        const label = jsonNode.description || dbNode.description || '';
+        const snippet = (jsonNode.content || dbNode.content || '').slice(0, 300).replace(/\s+/g, ' ');
+        return `Node ${idx}: ${label}\n  Snippet: ${snippet}`;
+      })
+      .filter(Boolean)
+      .join('\n\n');
+  }
 
   for (const item of planItems) {
     const fromNodeId = item.fromNodeId;
@@ -145,88 +183,155 @@ export async function processBranchingJob(job: Job<BranchingJobData>): Promise<v
     const fromJson = nodesJson[String(fromNodeId)] as JsonNode | undefined;
     if (!fromDb || !fromJson) continue;
 
-    // 每个 planItem 不再只生成一个节点，而是生成一小段支线节点序列
-    // （例如 3~8 个），以便支线有类似主线那样的细分结构。
+    const baseBranchSummary = item.summary || fromJson.description || '';
 
-    const chapterContent = buildChapterContent(
-      chapters,
-      fromJson.startChapter,
-      fromJson.endChapter,
-    );
+    // ---------- Stage B: per-branch event planning ----------
+    const mainContext = buildMainContextAround(fromNodeId, item.returnNodeId ?? undefined) || mainSummary;
 
-    const baseDescription = item.summary || fromJson.description || '';
-
-    const mainSnippet = `${fromJson.description}\n\n${chapterContent.slice(0, 2000)}`;
-
-    let returnSnippet: string | undefined;
-    if (item.type === 'convergent' && item.returnNodeId) {
-      const retJson = nodesJson[String(item.returnNodeId)] as JsonNode | undefined;
-      if (retJson?.content) {
-        returnSnippet = String(retJson.content).split(/\n\n+/)[0].slice(0, 400);
-      }
-    }
-
-    const branchModel = getModel(MODEL_ROUTER.writer);
-    const writePrompt = await getBranchWritePrompt({
-      fromNodeId,
-      baseDescription,
-      mainSnippet,
-      branchType: item.type,
-      returnSnippet,
-      language: config.novelLanguage,
+    await publishEvent(channel, {
+      type: 'thought',
+      message: `[Brancher] Planning events for ${item.type} branch from main node #${fromNodeId}...`,
+      data: { fromNodeId, type: item.type },
     });
 
-    const rawContent = await chatWithRetry(writePrompt, {
-      model: branchModel,
-      maxTokens: TOKEN_LIMITS.writer,
-    });
+    const minEvents = 3;
+    const maxEvents = 8;
 
-    const cleanedContent = cleanMarkdownCodeBlock(rawContent);
-
-    // Optional: apply the same post-processing rename pipeline as main-line
-    // writer when remapCharacters is enabled and we have a characterMap.
-    let finalContent = cleanedContent;
-    const shouldRemap = remapCharacters && Object.keys(characterMap || {}).length > 0;
-
-    if (shouldRemap) {
-      await publishEvent(channel, {
-        type: 'thought',
-        message: `[Brancher] Applying character rename pipeline for branch based on main node #${fromNodeId}…`,
-        data: { fromNodeId, characterMapSize: Object.keys(characterMap || {}).length },
+    let branchEvents: BranchEventPlanItem[] = [];
+    try {
+      const eventsPrompt = await getBranchEventsPrompt({
+        fromNodeId,
+        returnNodeId: item.returnNodeId ?? null,
+        branchType: item.type,
+        branchSummary: baseBranchSummary,
+        mainContext,
+        minEvents,
+        maxEvents,
+        language: config.novelLanguage,
       });
 
-      try {
-        const renamePrompt = await getRenameNodePrompt({
-          nodeId: fromNodeId,
-          originalContent: cleanedContent,
-          characterMapJson: JSON.stringify(characterMap, null, 2),
-          language: config.novelLanguage as 'cn' | 'en',
-        });
+      const rawEvents = await chatWithRetry(eventsPrompt, {
+        model: resolvedModel,
+        maxTokens: TOKEN_LIMITS.planner,
+      });
 
-        const renamed = await chatWithRetry(renamePrompt, {
-          model: getModel('chat'),
-          maxTokens: TOKEN_LIMITS.writer,
-        });
+      const parsed = parseJsonLoose(rawEvents);
+      const arr = Array.isArray(parsed) ? parsed : Array.isArray((parsed as any)?.events) ? (parsed as any).events : [];
 
-        finalContent = cleanMarkdownCodeBlock(renamed);
-      } catch (renameError) {
-        console.warn('[Brancher] Character rename LLM pass failed, falling back to string replacement only:', renameError);
-      }
-
-      // String-level fallback, mirroring writer.ts
-      finalContent = applyCharacterMapStringReplace(
-        finalContent,
-        characterMap,
-        config.novelLanguage as 'cn' | 'en',
-      );
+      branchEvents = arr
+        .map((e: any, idx: number) => ({
+          eventId: Number(e.eventId ?? idx + 1),
+          anchorMainNodeId: Number(e.anchorMainNodeId ?? fromNodeId),
+          title: String(e.title ?? '').trim() || `Event ${idx + 1}`,
+          summary: String(e.summary ?? '').trim() || baseBranchSummary,
+          notes: e.notes ? String(e.notes) : undefined,
+        }))
+        .filter((e: BranchEventPlanItem) => Number.isFinite(e.anchorMainNodeId));
+    } catch (e) {
+      console.warn('[Brancher] Failed to plan events for branch, falling back to single event:', e);
     }
 
-    // 将完整的支线文本按段落拆分成多个节点文档（目标 3~8 个节点）。
-    const segments = splitBranchContentIntoNodes(finalContent, 3, 8);
+    if (!branchEvents.length) {
+      branchEvents = [
+        {
+          eventId: 1,
+          anchorMainNodeId: fromNodeId,
+          title: baseBranchSummary || `Branch from node #${fromNodeId}`,
+          summary: baseBranchSummary || 'Auto-generated branch event',
+        },
+      ];
+    }
 
-    for (let idx = 0; idx < segments.length; idx++) {
-      const segmentContent = segments[idx];
-      const isLast = idx === segments.length - 1;
+    await publishEvent(channel, {
+      type: 'thought',
+      message: `[Brancher] Planned ${branchEvents.length} events for branch from node #${fromNodeId}. Generating nodes...`,
+      data: { fromNodeId, type: item.type, eventCount: branchEvents.length },
+    });
+
+    // ---------- Stage C: per-event node generation ----------
+    for (let idx = 0; idx < branchEvents.length; idx++) {
+      const event = branchEvents[idx];
+      const isLast = idx === branchEvents.length - 1;
+
+      const anchorDb = mainNodesDb.find((n) => n.nodeIndex === event.anchorMainNodeId) || fromDb;
+      const anchorJson = (nodesJson[String(event.anchorMainNodeId)] as JsonNode | undefined) || fromJson;
+
+      const chapterContent = buildChapterContent(
+        chapters,
+        anchorJson?.startChapter ?? fromJson.startChapter,
+        anchorJson?.endChapter ?? fromJson.endChapter,
+      );
+
+      const mainSnippetParts: string[] = [];
+      if (anchorJson?.description || anchorDb?.description) {
+        mainSnippetParts.push(String(anchorJson?.description || anchorDb?.description));
+      }
+      if (item.type === 'convergent' && item.returnNodeId) {
+        const retJson = nodesJson[String(item.returnNodeId)] as JsonNode | undefined;
+        if (retJson?.content) {
+          const retSnippet = String(retJson.content).split(/\n\n+/)[0].slice(0, 400);
+          mainSnippetParts.push(`(Target return point snippet)\n${retSnippet}`);
+        }
+      }
+      mainSnippetParts.push(chapterContent.slice(0, 2000));
+      const mainSnippet = mainSnippetParts.join('\n\n');
+
+      const eventDescription = `${baseBranchSummary ? `${baseBranchSummary} · ` : ''}${event.title}`;
+
+      const branchModel = getModel(MODEL_ROUTER.writer);
+      const writePrompt = await getBranchWritePrompt({
+        fromNodeId,
+        baseDescription: eventDescription,
+        mainSnippet,
+        branchType: item.type,
+        returnSnippet: undefined,
+        language: config.novelLanguage,
+      });
+
+      const rawContent = await chatWithRetry(writePrompt, {
+        model: branchModel,
+        maxTokens: TOKEN_LIMITS.writer,
+      });
+
+      const cleanedContent = cleanMarkdownCodeBlock(rawContent);
+
+      // Optional: apply the same post-processing rename pipeline as main-line
+      // writer when remapCharacters is enabled and we have a characterMap.
+      let finalContent = cleanedContent;
+      const shouldRemap = remapCharacters && Object.keys(characterMap || {}).length > 0;
+
+      if (shouldRemap) {
+        await publishEvent(channel, {
+          type: 'thought',
+          message: `[Brancher] Applying character rename pipeline for branch event ${event.eventId} from main node #${fromNodeId}…`,
+          data: { fromNodeId, eventId: event.eventId, characterMapSize: Object.keys(characterMap || {}).length },
+        });
+
+        try {
+          const renamePrompt = await getRenameNodePrompt({
+            nodeId: fromNodeId,
+            originalContent: cleanedContent,
+            characterMapJson: JSON.stringify(characterMap, null, 2),
+            language: config.novelLanguage as 'cn' | 'en',
+          });
+
+          const renamed = await chatWithRetry(renamePrompt, {
+            model: getModel('chat'),
+            maxTokens: TOKEN_LIMITS.writer,
+          });
+
+          finalContent = cleanMarkdownCodeBlock(renamed);
+        } catch (renameError) {
+          console.warn('[Brancher] Character rename LLM pass failed, falling back to string replacement only:', renameError);
+        }
+
+        // String-level fallback, mirroring writer.ts
+        finalContent = applyCharacterMapStringReplace(
+          finalContent,
+          characterMap,
+          config.novelLanguage as 'cn' | 'en',
+        );
+      }
 
       const branchNodeId = nextId++;
       const dbNodeType = isLast ? 'branch_end' : 'branch_body';
@@ -237,32 +342,30 @@ export async function processBranchingJob(job: Job<BranchingJobData>): Promise<v
           sessionId,
           type: dbNodeType,
           nodeIndex: branchNodeId,
-          title: baseDescription.slice(0, 50),
-          description: baseDescription,
-          content: segmentContent,
-          startChapter: fromJson.startChapter ?? null,
-          endChapter: fromJson.endChapter ?? null,
+          title: event.title.slice(0, 50) || baseBranchSummary.slice(0, 50),
+          description: eventDescription,
+          content: finalContent,
+          startChapter: anchorJson?.startChapter ?? fromJson.startChapter ?? null,
+          endChapter: anchorJson?.endChapter ?? fromJson.endChapter ?? null,
           parentId: fromNodeId,
           returnToNodeId:
             isLast && item.type === 'convergent' && item.returnNodeId
               ? item.returnNodeId
               : null,
-          branchReason: baseDescription,
+          branchReason: baseBranchSummary,
           status: 'completed',
           qualityScore: null,
         },
       });
 
       // Update Session.nodes JSON so frontend can see the branch immediately.
-      // 我们继续复用 fromJson.type 作为 UI 上的高光/日常分类，branchKind
-      // 表示这是支线，以及属于哪种支线类型。
       nodesJson[String(branchNodeId)] = {
         id: branchNodeId,
         type: fromJson.type, // reuse highlight/normal classification for UI
-        startChapter: fromJson.startChapter,
-        endChapter: fromJson.endChapter,
-        description: baseDescription,
-        content: segmentContent,
+        startChapter: anchorJson?.startChapter ?? fromJson.startChapter,
+        endChapter: anchorJson?.endChapter ?? fromJson.endChapter,
+        description: eventDescription,
+        content: finalContent,
         status: 'completed',
         createdAt: new Date().toISOString(),
         // Branch metadata for frontend
@@ -272,6 +375,7 @@ export async function processBranchingJob(job: Job<BranchingJobData>): Promise<v
           isLast && item.type === 'convergent' && item.returnNodeId
             ? item.returnNodeId
             : null,
+        branchEventId: event.eventId,
       } as any;
 
       // Persist incrementally so that already generated branches are durable
@@ -283,8 +387,14 @@ export async function processBranchingJob(job: Job<BranchingJobData>): Promise<v
 
       await publishEvent(channel, {
         type: 'log',
-        message: `[Brancher] Generated branch node #${branchNodeId} (segment ${idx + 1}/$${segments.length}) from main node #${fromNodeId} (${item.type})`,
-        data: { branchId: branchNodeId, fromNodeId, type: item.type, segmentIndex: idx },
+        message: `[Brancher] Generated branch node #${branchNodeId} for event ${event.eventId}/${branchEvents.length} from main node #${fromNodeId} (${item.type})`,
+        data: {
+          branchId: branchNodeId,
+          fromNodeId,
+          type: item.type,
+          eventId: event.eventId,
+          eventIndex: idx,
+        },
       });
     }
   }
@@ -322,47 +432,6 @@ function applyCharacterMapStringReplace(
   }
 
   return result;
-}
-
-// 将完整支线文本切分为多个节点文档，目标在 minNodes-maxNodes 之间，
-// 以段落为基础进行粗略分组，保证每个节点都有完整的段落组合。
-function splitBranchContentIntoNodes(
-  content: string,
-  minNodes: number,
-  maxNodes: number,
-): string[] {
-  const trimmed = content.trim();
-  if (!trimmed) return [];
-
-  const paragraphs = trimmed.split(/\n{2,}/).map((p) => p.trim()).filter(Boolean);
-  if (paragraphs.length === 0) return [trimmed];
-
-  const totalChars = trimmed.length;
-  // 粗略估计每个节点的目标长度（中文一般 800~1500 字，这里取中值约 1200 字）
-  const idealPerNode = 1200;
-  let targetCount = Math.round(totalChars / idealPerNode);
-  targetCount = Math.max(minNodes, Math.min(maxNodes, targetCount || minNodes));
-
-  // 如果段落本身就比目标节点数少，就按段落个数来；
-  // 否则按 chunkSize 均分段落。
-  const chunkSize = Math.max(1, Math.round(paragraphs.length / targetCount));
-  const segments: string[] = [];
-
-  for (let i = 0; i < paragraphs.length; i += chunkSize) {
-    const chunk = paragraphs.slice(i, i + chunkSize).join('\n\n');
-    if (chunk.trim()) segments.push(chunk.trim());
-  }
-
-  // 确保至少有一个节点
-  if (!segments.length) return [trimmed];
-
-  // 如果节点数仍然多于 maxNodes，则把最后几段合并到前面的节点里
-  while (segments.length > maxNodes && segments.length > 1) {
-    const last = segments.pop()!;
-    segments[segments.length - 1] = `${segments[segments.length - 1]}\n\n${last}`;
-  }
-
-  return segments;
 }
 
 // Reuse chapter content builder from writer

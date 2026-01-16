@@ -1345,7 +1345,14 @@ export default function App() {
           {/* Left: Node List */}
           <div className="ide-sidebar" style={{ background: 'white', borderRadius: '0.5rem', border: '1px solid var(--gray-200)', overflowY: 'auto', display: 'flex', flexDirection: 'column' }}>
             <div style={{ padding: '0.75rem', borderBottom: '1px solid var(--gray-200)', fontWeight: '600', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <span>{tr('节点列表', 'Node list')} ({completedNodes}/{nodes.length})</span>
+              <div style={{ display: 'flex', flexDirection: 'column' }}>
+                <span>{tr('节点列表', 'Node list')} ({completedNodes}/{nodes.length})</span>
+                {step === 'branching' && nodeViewMode === 'branch' && (
+                  <span style={{ marginTop: '0.15rem', fontSize: '0.75rem', color: '#4f46e5' }}>
+                    {tr('🧬 正在自动生成支线...', '🧬 Auto-branching in progress...')}
+                  </span>
+                )}
+              </div>
               <div style={{ display: 'flex', gap: '0.25rem', padding: '0.1rem', borderRadius: '999px', background: '#eef2ff' }}>
                 <button
                   className={`btn-tab ${nodeViewMode === 'main' ? 'active' : ''}`}
@@ -1377,10 +1384,145 @@ export default function App() {
                 </button>
               </div>
             </div>
-            <div className="node-list">
-              {nodes
-                .filter(node => (nodeViewMode === 'main' ? !node.branchKind : !!node.branchKind))
-                .map(node => {
+            <div className="node-list" style={{ paddingBottom: '0.25rem' }}>
+              {(() => {
+                const visibleNodes = nodes.filter(node => (nodeViewMode === 'main' ? !node.branchKind : !!node.branchKind));
+
+                if (nodeViewMode === 'branch') {
+                  if (visibleNodes.length === 0) {
+                    return (
+                      <div style={{ padding: '0.75rem', fontSize: '0.8rem', color: 'var(--gray-500)' }}>
+                        {tr('正在为主线生成支线大纲和节点，请稍候…', 'Planning and generating branch routes, please wait…')}
+                      </div>
+                    );
+                  }
+
+                  // Group branch nodes by (parentNodeId, branchKind, returnToNodeId)
+                  const groups = Object.values(
+                    visibleNodes.reduce((acc: any, node) => {
+                      const parentId = node.parentNodeId || 0;
+                      const key = `${parentId}-${node.branchKind || 'branch'}-${node.returnToNodeId ?? 'null'}`;
+                      if (!acc[key]) {
+                        const rawDesc = node.description || '';
+                        const parts = rawDesc.split(' · ');
+                        const branchSummary = (node as any).branchReason || (parts.length > 1 ? parts[0] : rawDesc);
+                        acc[key] = {
+                          parentNodeId: parentId,
+                          branchKind: node.branchKind || 'divergent',
+                          returnToNodeId: node.returnToNodeId ?? null,
+                          branchSummary,
+                          nodes: [] as Node[],
+                        };
+                      }
+                      acc[key].nodes.push(node);
+                      return acc;
+                    }, {} as Record<string, { parentNodeId: number; branchKind: 'divergent' | 'convergent'; returnToNodeId: number | null; branchSummary: string; nodes: Node[] }>),
+                  ).sort((a, b) => a.parentNodeId - b.parentNodeId);
+
+                  return groups.map(group => {
+                    const icon = group.branchKind === 'divergent' ? '🧬' : '🌿';
+                    const headerLabel = group.branchKind === 'convergent'
+                      ? tr(
+                          `支线 自主线 #${group.parentNodeId} → #${group.returnToNodeId ?? '?'}`,
+                          `Branch main #${group.parentNodeId} → #${group.returnToNodeId ?? '?'}`,
+                        )
+                      : tr(
+                          `支线 自主线 #${group.parentNodeId}`,
+                          `Branch from main #${group.parentNodeId}`,
+                        );
+
+                    const sortedNodes = [...group.nodes].sort((a, b) => {
+                      const ea = (a as any).branchEventId ?? a.id;
+                      const eb = (b as any).branchEventId ?? b.id;
+                      return ea - eb;
+                    });
+
+                    return (
+                      <div key={`${group.parentNodeId}-${group.branchKind}-${group.returnToNodeId ?? 'null'}`} style={{ borderBottom: '1px solid var(--gray-100)' }}>
+                        <div
+                          style={{
+                            padding: '0.55rem 0.75rem 0.4rem',
+                            background: '#f9fafb',
+                            borderBottom: '1px dashed var(--gray-200)',
+                          }}
+                        >
+                          <div style={{ fontSize: '0.8rem', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
+                            <span>{icon}</span>
+                            <span>{headerLabel}</span>
+                          </div>
+                          {group.branchSummary && (
+                            <div style={{ marginTop: '0.15rem', fontSize: '0.75rem', color: 'var(--gray-500)', lineHeight: 1.4 }}>
+                              {group.branchSummary}
+                            </div>
+                          )}
+                        </div>
+                        {sortedNodes.map(node => {
+                          const eventId = (node as any).branchEventId ?? null;
+                          const rawDesc = node.description || '';
+                          const parts = rawDesc.split(' · ');
+                          const eventTitle = parts.length > 1 ? parts.slice(1).join(' · ') : rawDesc;
+
+                          return (
+                            <div
+                              key={node.id}
+                              className={`exec-node ${node.status} ${selectedNodeId === node.id ? 'selected' : ''}`}
+                              onClick={() => setSelectedNodeId(node.id)}
+                              style={{
+                                padding: '0.55rem 0.75rem',
+                                cursor: 'pointer',
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: '0.4rem',
+                                background:
+                                  selectedNodeId === node.id
+                                    ? '#eff6ff'
+                                    : node.status === 'generating'
+                                      ? '#fef3c7'
+                                      : 'white',
+                              }}
+                            >
+                              <span style={{ fontSize: '0.75rem', color: 'var(--gray-500)', minWidth: '2rem' }}>
+                                {eventId ? `E${eventId}` : `#${node.id}`}
+                              </span>
+                              <span
+                                style={{
+                                  flex: 1,
+                                  whiteSpace: 'nowrap',
+                                  overflow: 'hidden',
+                                  textOverflow: 'ellipsis',
+                                  fontSize: '0.8rem',
+                                }}
+                              >
+                                {eventTitle}
+                              </span>
+                              {typeof node.qualityScore === 'number' && (
+                                <span style={{ fontSize: '0.75rem', color: 'var(--gray-400)' }}>★{node.qualityScore}</span>
+                              )}
+                              <span>
+                                {node.status === 'completed'
+                                  ? '✅'
+                                  : node.status === 'generating'
+                                    ? '⏳'
+                                    : '○'}
+                              </span>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    );
+                  });
+                }
+
+                // Main-line view: keep simple flat list
+                if (visibleNodes.length === 0) {
+                  return (
+                    <div style={{ padding: '0.75rem', fontSize: '0.8rem', color: 'var(--gray-500)' }}>
+                      {tr('暂无节点，请先完成前序步骤。', 'No nodes yet, please finish previous steps.')}
+                    </div>
+                  );
+                }
+
+                return visibleNodes.map(node => {
                   const isBranch = !!node.branchKind;
                   const icon = isBranch
                     ? node.branchKind === 'divergent'
@@ -1420,23 +1562,7 @@ export default function App() {
                           fontSize: '0.85rem',
                         }}
                       >
-                        {icon} {node.description.slice(0, 10)}
-                        {isBranch && node.parentNodeId && (
-                          <span
-                            style={{
-                              marginLeft: '0.25rem',
-                              fontSize: '0.7rem',
-                              color: 'var(--gray-400)',
-                            }}
-                          >
-                            {node.branchKind === 'convergent'
-                              ? tr(
-                                  `支线 ${node.parentNodeId}→${node.returnToNodeId ?? '?'}`,
-                                  `Br ${node.parentNodeId}→${node.returnToNodeId ?? '?'}`,
-                                )
-                              : tr(`分支自 #${node.parentNodeId}`, `from #${node.parentNodeId}`)}
-                          </span>
-                        )}
+                        {icon} {node.description.slice(0, 16)}
                       </span>
                       {typeof node.qualityScore === 'number' && (
                         <span style={{ fontSize: '0.75rem', color: 'var(--gray-400)' }}>★{node.qualityScore}</span>
@@ -1450,9 +1576,10 @@ export default function App() {
                       </span>
                     </div>
                   );
-                })}
-              </div>
+                });
+              })()}
             </div>
+          </div>
 
             {/* Center: Editor */}
             <div className="ide-editor" style={{ background: 'white', borderRadius: '0.5rem', border: '1px solid var(--gray-200)', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
@@ -1517,8 +1644,16 @@ export default function App() {
                   </div>
                 </>
               ) : (
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: 'var(--gray-400)' }}>
-                  {tr('👈 请从左侧选择一个节点', '👈 Select a node from the left')}
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: 'var(--gray-400)', textAlign: 'center', padding: '0 1.5rem' }}>
+                  {step === 'branching'
+                    ? (
+                      <div>
+                        <div style={{ fontSize: '1.5rem', marginBottom: '0.5rem' }}>🧬</div>
+                        <div>{tr('正在规划支线大纲与事件，请稍候，节点会在左侧逐个出现。', 'Planning branch outlines and events. New branch nodes will appear on the left as they are ready.')}</div>
+                        <div style={{ fontSize: '0.8rem', marginTop: '0.5rem' }}>{tr('可以先查看右侧思考流了解当前进度。', 'You can watch the thought stream on the right for live progress.')}</div>
+                      </div>
+                    )
+                    : tr('👈 请从左侧选择一个节点', '👈 Select a node from the left')}
                 </div>
               )}
             </div>
@@ -1560,6 +1695,70 @@ export default function App() {
                   <div className="progress-fill" style={{ width: `${(completedNodes / nodes.length) * 100}%` }} />
                 </div>
               </div>
+
+              {/* Branch overview (when any branch nodes exist) */}
+              {nodes.some(n => n.branchKind) && (
+                <div style={{ padding: '0.75rem', borderBottom: '1px solid var(--gray-200)', fontSize: '0.8rem' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: '0.25rem' }}>
+                    <span style={{ fontWeight: 600 }}>{tr('支线概览', 'Branch overview')}</span>
+                    {(() => {
+                      const branchNodes = nodes.filter(n => !!n.branchKind);
+                      const groups = Object.values(
+                        branchNodes.reduce((acc: any, node) => {
+                          const parentId = node.parentNodeId || 0;
+                          const key = `${parentId}-${node.branchKind || 'branch'}-${node.returnToNodeId ?? 'null'}`;
+                          if (!acc[key]) {
+                            acc[key] = { parentNodeId: parentId, branchKind: node.branchKind || 'divergent', returnToNodeId: node.returnToNodeId ?? null, count: 0 };
+                          }
+                          acc[key].count += 1;
+                          return acc;
+                        }, {} as Record<string, { parentNodeId: number; branchKind: 'divergent' | 'convergent'; returnToNodeId: number | null; count: number }>),
+                      );
+                      return (
+                        <span style={{ color: 'var(--gray-500)', fontSize: '0.75rem' }}>
+                          {tr(`共 ${groups.length} 条 / ${branchNodes.length} 个节点`, `${groups.length} branches / ${branchNodes.length} nodes`)}
+                        </span>
+                      );
+                    })()}
+                  </div>
+                  <div style={{ maxHeight: '80px', overflowY: 'auto', paddingRight: '0.25rem' }}>
+                    {(() => {
+                      const branchNodes = nodes.filter(n => !!n.branchKind);
+                      const groups = Object.values(
+                        branchNodes.reduce((acc: any, node) => {
+                          const parentId = node.parentNodeId || 0;
+                          const key = `${parentId}-${node.branchKind || 'branch'}-${node.returnToNodeId ?? 'null'}`;
+                          if (!acc[key]) {
+                            acc[key] = { parentNodeId: parentId, branchKind: node.branchKind || 'divergent', returnToNodeId: node.returnToNodeId ?? null, count: 0 };
+                          }
+                          acc[key].count += 1;
+                          return acc;
+                        }, {} as Record<string, { parentNodeId: number; branchKind: 'divergent' | 'convergent'; returnToNodeId: number | null; count: number }>),
+                      ).sort((a, b) => a.parentNodeId - b.parentNodeId);
+                      return groups.map((g, idx) => {
+                        const icon = g.branchKind === 'divergent' ? '🧬' : '🌿';
+                        const label = g.branchKind === 'convergent'
+                          ? tr(
+                              `#${g.parentNodeId} → #${g.returnToNodeId ?? '?'}`,
+                              `#${g.parentNodeId} → #${g.returnToNodeId ?? '?'}`,
+                            )
+                          : tr(
+                              `自主线 #${g.parentNodeId}`,
+                              `from #${g.parentNodeId}`,
+                            );
+                        return (
+                          <div key={idx} style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.15rem' }}>
+                            <span>
+                              {icon} {label}
+                            </span>
+                            <span style={{ color: 'var(--gray-500)' }}>E{g.count}</span>
+                          </div>
+                        );
+                      });
+                    })()}
+                  </div>
+                </div>
+              )}
 
               <div style={{ padding: '0.75rem', borderBottom: '1px solid var(--gray-200)', display: 'flex', gap: '0.5rem' }}>
                 {!isPaused ? (

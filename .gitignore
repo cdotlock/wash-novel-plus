@@ -27,8 +27,11 @@ npm-debug.log*
 Thumbs.db
 
 # Prisma
-prisma/*.db
 prisma/*.db-journal
+prisma/dev.db*
+
+# Langfuse prompt snapshots
+prompts_snapshot*.json
 
 # Test
 coverage/

@@ -30,6 +30,7 @@ export const PROMPT_NAMES = {
     CHARACTER_MAP: 'wash-characters',
     BRANCH_PLAN: 'wash-branch-plan',
     BRANCH_WRITE: 'wash-branch-write',
+    BRANCH_EVENTS: 'wash-branch-events',
     RENAME_NODE: 'wash-rename-node',
 } as const;
 
@@ -176,6 +177,25 @@ export async function getBranchPlanPrompt(vars: {
     language?: 'cn' | 'en';
 }): Promise<string | any[]> {
     return getPrompt(PROMPT_NAMES.BRANCH_PLAN, vars);
+}
+
+/**
+ * Get per-branch event planning prompt
+ *
+ * 该 Prompt 针对「单条支线」，在给定主线上下文和支线概要的前提下，规划 3-8 个离散事件，
+ * 每个事件都锚定到某个主线节点（anchorMainNodeId），便于后续写作时引用主线节点内容。
+ */
+export async function getBranchEventsPrompt(vars: {
+    fromNodeId: number;
+    returnNodeId?: number | null;
+    branchType: 'divergent' | 'convergent';
+    branchSummary: string;
+    mainContext: string;
+    minEvents: number;
+    maxEvents: number;
+    language?: 'cn' | 'en';
+}): Promise<string | any[]> {
+    return getPrompt(PROMPT_NAMES.BRANCH_EVENTS, vars);
 }
 
 /**

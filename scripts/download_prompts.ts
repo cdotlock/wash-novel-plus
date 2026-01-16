@@ -21,8 +21,9 @@ const BASE_PROMPTS = [
   'wash-memory',
   'wash-review',
   'wash-characters',
-  'wash-branch-plan',
+'wash-branch-plan',
   'wash-branch-write',
+  'wash-branch-events',
   'wash-rename-node',
 ];
 
