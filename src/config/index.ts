@@ -39,6 +39,16 @@ export const config = {
     // Language
     novelLanguage: (process.env.NOVEL_LANGUAGE || 'cn') as 'cn' | 'en',
 
+    // Business constants
+    business: {
+        chapterContentLimit: parseInt(process.env.CHAPTER_CONTENT_LIMIT || '6000', 10),
+        targetDivergentBranches: parseInt(process.env.TARGET_DIVERGENT_BRANCHES || '2', 10),
+        targetConvergentBranches: parseInt(process.env.TARGET_CONVERGENT_BRANCHES || '3', 10),
+        memoryRecentLimit: parseInt(process.env.MEMORY_RECENT_LIMIT || '3', 10),
+        memoryImportantLimit: parseInt(process.env.MEMORY_IMPORTANT_LIMIT || '10', 10),
+        memoryMinImportance: parseInt(process.env.MEMORY_MIN_IMPORTANCE || '3', 10),
+    },
+
     // Environment
     isDev: process.env.NODE_ENV !== 'production',
     isProd: process.env.NODE_ENV === 'production',

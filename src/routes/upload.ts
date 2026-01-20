@@ -9,9 +9,16 @@ import { Chapter } from '../schemas/session.js';
 
 // Request schema
 const UploadRequestSchema = z.object({
-    content: z.string().min(100),
+    content: z.string().min(1),  // Allow shorter content when chapters are pre-parsed
     name: z.string().optional(),
+    // Optional: pre-parsed chapters (skips auto-parsing when provided)
+    chapters: z.array(z.object({
+        number: z.number(),
+        title: z.string(),
+        content: z.string(),
+    })).optional(),
 });
+
 
 // Chapter parsing patterns - Enhanced for bilingual support
 const CHAPTER_PATTERNS = {
@@ -339,8 +346,15 @@ export async function uploadRoutes(app: FastifyInstance): Promise<void> {
                 return reply.status(404).send({ error: 'Session not found' });
             }
 
-            // Parse chapters
-            const chapters = parseChapters(body.content);
+            // Use pre-parsed chapters if provided, otherwise auto-parse from content
+            let chapters: Chapter[];
+            if (body.chapters && body.chapters.length > 0) {
+                // Trust provided chapter structure (skip auto-parsing)
+                chapters = body.chapters;
+            } else {
+                // Auto-parse chapters from raw content
+                chapters = parseChapters(body.content);
+            }
 
             if (chapters.length === 0) {
                 return reply.status(400).send({ error: 'No chapters found in content' });
@@ -351,6 +365,7 @@ export async function uploadRoutes(app: FastifyInstance): Promise<void> {
             for (const chapter of chapters) {
                 chaptersRecord[chapter.number] = chapter;
             }
+
 
             // Update session
             await prisma.session.update({
@@ -367,6 +382,78 @@ export async function uploadRoutes(app: FastifyInstance): Promise<void> {
                 success: true,
                 chapterCount: chapters.length,
                 chapters: chapters.map((c) => ({
+                    number: c.number,
+                    title: c.title,
+                    contentLength: c.content.length,
+                })),
+            };
+        }
+    );
+
+    // Direct chapter upload (skip auto-parsing, for multi-file uploads)
+    // When frontend uploads multiple files, each file IS a chapter - no parsing needed
+    const DirectChaptersSchema = z.object({
+        chapters: z.array(z.object({
+            number: z.number(),
+            title: z.string(),
+            content: z.string(),
+        })),
+        name: z.string().optional(),
+    });
+
+    app.post<{ Params: { id: string } }>(
+        '/api/sessions/:id/upload-chapters',
+        async (request, reply) => {
+            const { id } = request.params;
+            const body = DirectChaptersSchema.parse(request.body);
+
+            // Check session exists
+            const session = await prisma.session.findUnique({
+                where: { id },
+            });
+
+            if (!session) {
+                return reply.status(404).send({ error: 'Session not found' });
+            }
+
+            if (body.chapters.length === 0) {
+                return reply.status(400).send({ error: 'No chapters provided' });
+            }
+
+            // Check for duplicate chapter numbers
+            const seenNumbers = new Set<number>();
+            const duplicates: number[] = [];
+            for (const chapter of body.chapters) {
+                if (seenNumbers.has(chapter.number)) {
+                    duplicates.push(chapter.number);
+                }
+                seenNumbers.add(chapter.number);
+            }
+            if (duplicates.length > 0) {
+                request.log.warn({ duplicates, sessionId: id }, 'Duplicate chapter numbers detected - later chapters will overwrite earlier ones');
+            }
+
+            // Convert to record (trust frontend structure, no re-parsing)
+
+            const chaptersRecord: Record<string, Chapter> = {};
+            for (const chapter of body.chapters) {
+                chaptersRecord[chapter.number] = chapter;
+            }
+
+            // Update session
+            await prisma.session.update({
+                where: { id },
+                data: {
+                    name: body.name ?? session.name,
+                    chapters: chaptersRecord,
+                    status: 'indexing',
+                },
+            });
+
+            return {
+                success: true,
+                chapterCount: body.chapters.length,
+                chapters: body.chapters.map((c) => ({
                     number: c.number,
                     title: c.title,
                     contentLength: c.content.length,

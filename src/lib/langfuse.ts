@@ -11,18 +11,14 @@ export const langfuse = new Langfuse({
     baseUrl: process.env.LANGFUSE_BASE_URL || 'https://cloud.langfuse.com',
 });
 
-// Prompt names - these must exist in Langfuse
 import { config } from '../config/index.js';
 
-// ... (imports)
-
-// Prompt names - these must exist in Langfuse
 export const PROMPT_NAMES = {
     INDEXING: 'wash-indexing',
     PLANNING_AUTO: 'wash-planning-auto',
     PLANNING_SPLIT: 'wash-planning-split',
     PLANNING_MERGE: 'wash-planning-merge',
-    PLANNING_ADJUST: 'wash-planning-adjust',
+
     PLANNING_BUTTERFLY: 'wash-planning-butterfly',
     WASH_GENERATE: 'wash-generate',
     WASH_MEMORY: 'wash-memory',
@@ -101,21 +97,7 @@ export async function getPlanningPrompt(vars: {
     return getPrompt(promptName, vars);
 }
 
-/**
- * Get planning adjustment prompt
- * 用于在初次规划后，根据目标节点数对 events 进行智能合并/拆分。
- *
- * 注意：currentEvents 以 JSON 字符串形式传入，便于在 Prompt 中直接展示。
- */
-export async function getPlanningAdjustPrompt(vars: {
-    mode: 'auto' | 'split' | 'merge';
-    chapterSummaries: string;
-    currentEvents: string; // JSON.stringify(events)
-    targetNodeCount: number;
-    language?: 'cn' | 'en';
-}): Promise<string | any[]> {
-    return getPrompt(PROMPT_NAMES.PLANNING_ADJUST, vars);
-}
+
 
 /**
  * Get butterfly-effect micro-tuning prompt for existing plans

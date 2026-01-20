@@ -13,10 +13,9 @@ import { Chapter } from '../schemas/session.js';
 import { Node } from '../schemas/node.js';
 import { config } from '../config/index.js';
 import { appendMemoryEntry, getMemoryContext } from '../lib/memory.js';
-
-// Bilingual message helper
-const isCn = () => config.novelLanguage === 'cn';
-const tr = (cn: string, en: string) => isCn() ? cn : en;
+import { isCn, tr } from '../lib/i18n.js';
+import { buildChapterContent } from '../lib/chapter-utils.js';
+import { applyCharacterMapStringReplace } from '../lib/character-utils.js';
 
 export async function processGeneratingJob(job: Job<GeneratingJobData>): Promise<void> {
     const { sessionId, taskId, nodeId, startFromNode, model, remapCharacters } = job.data;
@@ -281,20 +280,30 @@ export async function processGeneratingJob(job: Job<GeneratingJobData>): Promise
                 console.warn('Memory update failed, keeping previous memory context:', memoryError);
             }
 
-            // Update node and session (keep legacy JSON/globalMemory for compatibility)
+            // Update node and session atomically
             nodes[String(node.id)] = {
                 ...nodes[String(node.id)],
                 content: finalContent,
                 status: 'completed',
             };
 
-            await prisma.session.update({
-                where: { id: sessionId },
-                data: {
-                    nodes,
-                    // Optionally keep a snapshot of latest memory window on Session for old callers
-                    globalMemory,
-                },
+            // Use transaction to ensure atomic updates
+            await prisma.$transaction(async (tx) => {
+                await tx.session.update({
+                    where: { id: sessionId },
+                    data: {
+                        nodes,
+                        globalMemory,
+                    },
+                });
+
+                await tx.task.update({
+                    where: { id: taskId },
+                    data: {
+                        progress: Math.floor((generatedCount / total) * 100),
+                        context: { currentNode: node.id, globalMemory },
+                    },
+                });
             });
 
             await publishEvent(channel, {
@@ -318,16 +327,7 @@ export async function processGeneratingJob(job: Job<GeneratingJobData>): Promise
                 });
             }
 
-
-
-            // Update task progress
-            await prisma.task.update({
-                where: { id: taskId },
-                data: {
-                    progress: Math.floor((generatedCount / total) * 100),
-                    context: { currentNode: node.id, globalMemory },
-                },
-            });
+            generatedCount++;
 
         } catch (error) {
             console.error(`Error generating node ${node.id}:`, error);
@@ -371,50 +371,4 @@ export async function processGeneratingJob(job: Job<GeneratingJobData>): Promise
         message: `Generation complete! ${generatedCount}/${total} nodes generated.`,
         data: { generatedCount, total },
     });
-}
-
-// String-level fallback for character renaming
-// For CN, we do simple global substring replacement (longest keys first).
-// For EN, we additionally try to respect word boundaries.
-function applyCharacterMapStringReplace(
-    content: string,
-    characterMap: Record<string, string>,
-    language: 'cn' | 'en',
-): string {
-    if (!characterMap || !Object.keys(characterMap).length) return content;
-
-    const entries = Object.entries(characterMap).sort((a, b) => b[0].length - a[0].length);
-
-    let result = content;
-    for (const [oldName, newName] of entries) {
-        if (!oldName || !newName) continue;
-        const escaped = oldName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        const pattern = language === 'en'
-            ? new RegExp(`\\b${escaped}\\b`, 'g')
-            : new RegExp(escaped, 'g');
-        result = result.replace(pattern, newName);
-    }
-
-    return result;
-}
-
-// Build chapter content string
-function buildChapterContent(
-    chapters: Record<string, Chapter>,
-    startChapter: number,
-    endChapter: number
-): string {
-    const blocks: string[] = [];
-
-    for (let i = startChapter; i <= endChapter; i++) {
-        const chapter = chapters[String(i)];
-        if (chapter) {
-            const header = isCn()
-                ? `--- 第 ${chapter.number} 章: ${chapter.title} ---`
-                : `--- Chapter ${chapter.number}: ${chapter.title} ---`;
-            blocks.push(`${header}\n${chapter.content}`);
-        }
-    }
-
-    return blocks.join('\n\n');
 }

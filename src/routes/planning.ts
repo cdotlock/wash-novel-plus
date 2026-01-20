@@ -220,31 +220,39 @@ export async function planningRoutes(app: FastifyInstance): Promise<void> {
                     };
                 }
 
-                // Also persist main-line nodes into Node table for branching / future refactors
-                // For simplicity, we reset existing main nodes for this session and recreate
-                await prisma.node.deleteMany({ where: { sessionId: id, type: 'main' } });
-                await prisma.node.createMany({
-                    data: events.map((event: any) => ({
-                        sessionId: id,
-                        type: 'main',
-                        nodeIndex: event.id,
-                        title: String(event.description ?? '').slice(0, 50),
-                        description: String(event.description ?? ''),
-                        content: '',
-                        startChapter: event.startChapter ?? null,
-                        endChapter: event.endChapter ?? null,
-                        parentId: null,
-                        returnToNodeId: null,
-                        branchReason: null,
-                        status: 'pending',
-                        qualityScore: null,
-                    })),
-                });
-
                 updateData.planConfirmed = true;
-                // Store nodes as native JSON record
                 updateData.nodes = nodes;
                 updateData.status = 'confirmed';
+
+                // Use transaction to ensure atomic confirmation
+                await prisma.$transaction(async (tx) => {
+                    // Reset existing main nodes and recreate
+                    await tx.node.deleteMany({ where: { sessionId: id, type: 'main' } });
+                    await tx.node.createMany({
+                        data: events.map((event: any) => ({
+                            sessionId: id,
+                            type: 'main',
+                            nodeIndex: event.id,
+                            title: String(event.description ?? '').slice(0, 50),
+                            description: String(event.description ?? ''),
+                            content: '',
+                            startChapter: event.startChapter ?? null,
+                            endChapter: event.endChapter ?? null,
+                            parentId: null,
+                            returnToNodeId: null,
+                            branchReason: null,
+                            status: 'pending',
+                            qualityScore: null,
+                        })),
+                    });
+
+                    await tx.session.update({
+                        where: { id },
+                        data: updateData,
+                    });
+                });
+
+                return { success: true, confirmed: true };
             }
 
             await prisma.session.update({
@@ -254,7 +262,7 @@ export async function planningRoutes(app: FastifyInstance): Promise<void> {
 
             return { success: true, confirmed: body.confirmed ?? false };
         }
-        );
+    );
 
     // Adjust existing plan with butterfly-effect micro-tuning
     // This is a synchronous endpoint (no background task) that takes the

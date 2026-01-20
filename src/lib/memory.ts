@@ -1,4 +1,5 @@
 import { prisma } from './prisma.js';
+import { config } from '../config/index.js';
 
 interface MemoryWindowOptions {
   /** how many most recent records regardless of importance */
@@ -10,9 +11,9 @@ interface MemoryWindowOptions {
 }
 
 const DEFAULT_WINDOW: Required<MemoryWindowOptions> = {
-  recentLimit: 3,
-  minImportant: 3,
-  importantLimit: 10,
+  recentLimit: config.business.memoryRecentLimit,
+  minImportant: config.business.memoryMinImportance,
+  importantLimit: config.business.memoryImportantLimit,
 };
 
 export async function getMemoryContext(

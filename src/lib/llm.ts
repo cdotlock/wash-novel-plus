@@ -116,16 +116,31 @@ export async function chatWithRetry(
             return await chat(prompt, options);
         } catch (error) {
             lastError = error as Error;
+            const status = (error as any)?.status;
+            const errorCode = (error as any)?.code;
 
-            // Check if rate limited (429)
-            if ((error as any)?.status === 429) {
-                const delay = Math.min(1000 * Math.pow(2, attempt - 1) * (0.5 + Math.random()), 30000);
-                console.warn(`Rate limited, retrying in ${delay}ms (attempt ${attempt}/${maxRetries})`);
+            // Check if this is a retryable error:
+            // - Rate limit (429)
+            // - Server errors (500, 502, 503, 504)
+            // - Network errors (ECONNRESET, ETIMEDOUT, ENOTFOUND)
+            const isRateLimited = status === 429;
+            const isServerError = status >= 500 && status < 600;
+            const isNetworkError = ['ECONNRESET', 'ETIMEDOUT', 'ENOTFOUND', 'ECONNREFUSED'].includes(errorCode);
+
+            if (isRateLimited || isServerError || isNetworkError) {
+                const baseDelay = isRateLimited ? 1000 : 500;
+                const delay = Math.min(baseDelay * Math.pow(2, attempt - 1) * (0.5 + Math.random()), 30000);
+
+                const reason = isRateLimited ? 'Rate limited'
+                    : isServerError ? `Server error (${status})`
+                        : `Network error (${errorCode})`;
+
+                console.warn(`${reason}, retrying in ${Math.round(delay)}ms (attempt ${attempt}/${maxRetries})`);
                 await new Promise((resolve) => setTimeout(resolve, delay));
                 continue;
             }
 
-            // Rethrow non-retryable errors
+            // Rethrow non-retryable errors (4xx client errors, etc.)
             throw error;
         }
     }

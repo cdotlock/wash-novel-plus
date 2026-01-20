@@ -11,14 +11,14 @@ import {
   parseJsonField,
   parseJsonLoose,
   cleanMarkdownCodeBlock,
-  parseJsonField as parseJsonFieldLoose,
 } from '../lib/json-utils.js';
 import { Chapter } from '../schemas/session.js';
 import { Node as JsonNode } from '../schemas/node.js';
 import { config } from '../config/index.js';
 import { getBranchPlanPrompt, getBranchEventsPrompt, getBranchWritePrompt, getRenameNodePrompt } from '../lib/langfuse.js';
-
-const isCn = () => config.novelLanguage === 'cn';
+import { isCn } from '../lib/i18n.js';
+import { buildChapterContent } from '../lib/chapter-utils.js';
+import { applyCharacterMapStringReplace } from '../lib/character-utils.js';
 
 interface BranchPlanItem {
   type: 'divergent' | 'convergent';
@@ -55,12 +55,12 @@ export async function processBranchingJob(job: Job<BranchingJobData>): Promise<v
 
   const chapters = parseJsonField<Record<string, Chapter>>(session.chapters, {});
   const nodesJson = parseJsonField<Record<string, JsonNode>>(session.nodes, {});
-  const characterMap = parseJsonFieldLoose<Record<string, string>>(
+  const characterMap = parseJsonField<Record<string, string>>(
     // characterMap may be stored as JSON or string; normalize here
     (session as any).characterMap ?? {},
     {},
   );
-  const contentAnalysis = parseJsonFieldLoose<Record<string, any>>(
+  const contentAnalysis = parseJsonField<Record<string, any>>(
     (session as any).contentAnalysis ?? {},
     {},
   );
@@ -95,8 +95,8 @@ export async function processBranchingJob(job: Job<BranchingJobData>): Promise<v
   const resolvedModel = model ?? getModel(MODEL_ROUTER.planner);
   const planPrompt = await getBranchPlanPrompt({
     mainSummary,
-    targetDivergent: 2,
-    targetConvergent: 3,
+    targetDivergent: config.business.targetDivergentBranches,
+    targetConvergent: config.business.targetConvergentBranches,
     language: config.novelLanguage,
   });
 
@@ -409,48 +409,4 @@ export async function processBranchingJob(job: Job<BranchingJobData>): Promise<v
     type: 'complete',
     message: '[Brancher] Auto-branching complete.',
   });
-}
-
-// String-level fallback for character renaming (mirrors writer.ts)
-function applyCharacterMapStringReplace(
-  content: string,
-  characterMap: Record<string, string>,
-  language: 'cn' | 'en',
-): string {
-  if (!characterMap || !Object.keys(characterMap).length) return content;
-
-  const entries = Object.entries(characterMap).sort((a, b) => b[0].length - a[0].length);
-
-  let result = content;
-  for (const [oldName, newName] of entries) {
-    if (!oldName || !newName) continue;
-    const escaped = oldName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const pattern = language === 'en'
-      ? new RegExp(`\\b${escaped}\\b`, 'g')
-      : new RegExp(escaped, 'g');
-    result = result.replace(pattern, newName);
-  }
-
-  return result;
-}
-
-// Reuse chapter content builder from writer
-function buildChapterContent(
-  chapters: Record<string, Chapter>,
-  startChapter: number,
-  endChapter: number,
-): string {
-  const blocks: string[] = [];
-
-  for (let i = startChapter; i <= endChapter; i++) {
-    const chapter = chapters[String(i)];
-    if (chapter) {
-      const header = isCn()
-        ? `--- 第 ${chapter.number} 章: ${chapter.title} ---`
-        : `--- Chapter ${chapter.number}: ${chapter.title} ---`;
-      blocks.push(`${header}\n${chapter.content}`);
-    }
-  }
-
-  return blocks.join('\n\n');
 }

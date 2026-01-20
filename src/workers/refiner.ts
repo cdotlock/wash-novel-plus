@@ -12,10 +12,7 @@ import { ReviewResponseSchema } from '../schemas/llm-responses.js';
 import { ReviewingJobData } from '../lib/queue.js';
 import { Node } from '../schemas/node.js';
 import { config } from '../config/index.js';
-
-// Bilingual helper
-const isCn = () => config.novelLanguage === 'cn';
-const tr = (cn: string, en: string) => isCn() ? cn : en;
+import { isCn, tr } from '../lib/i18n.js';
 
 export async function processReviewingJob(job: Job<ReviewingJobData>): Promise<void> {
     const { sessionId, taskId, autoFix, model, nodeId } = job.data;
