@@ -10,9 +10,11 @@ services:
       POSTGRES_PASSWORD: wash
       POSTGRES_DB: wash
     ports:
-      - "54321:5432"
+      - "15432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    networks:
+      - wash-network
     healthcheck:
       test: [ "CMD-SHELL", "pg_isready -U wash -d wash" ]
       interval: 10s
@@ -24,9 +26,11 @@ services:
     container_name: wash-redis
     restart: unless-stopped
     ports:
-      - "6379:6379"
+      - "16379:6379"
     volumes:
       - redis_data:/data
+    networks:
+      - wash-network
     command: redis-server --appendonly yes
     healthcheck:
       test: [ "CMD", "redis-cli", "ping" ]
@@ -46,11 +50,13 @@ services:
       NODE_ENV: production
       PORT: 8000
       HOST: 0.0.0.0
-      DATABASE_URL: postgresql://wash:wash@postgres:5432/wash?schema=public
-      REDIS_URL: redis://redis:6379
+      DATABASE_URL: postgresql://wash:wash@wash-postgres:5432/wash?schema=public
+      REDIS_URL: redis://wash-redis:6379
       RUN_DB_MIGRATIONS: "true"
     ports:
       - "31800:8000"
+    networks:
+      - wash-network
     depends_on:
       postgres:
         condition: service_healthy
@@ -67,10 +73,12 @@ services:
       - .env.production
     environment:
       NODE_ENV: production
-      DATABASE_URL: postgresql://wash:wash@postgres:5432/wash?schema=public
-      REDIS_URL: redis://redis:6379
+      DATABASE_URL: postgresql://wash:wash@wash-postgres:5432/wash?schema=public
+      REDIS_URL: redis://wash-redis:6379
       RUN_DB_MIGRATIONS: "false"
     command: ["node", "dist/workers/index.js"]
+    networks:
+      - wash-network
     depends_on:
       postgres:
         condition: service_healthy
@@ -85,8 +93,14 @@ services:
     restart: unless-stopped
     ports:
       - "31801:8001"
+    networks:
+      - wash-network
     depends_on:
       - api
+
+networks:
+  wash-network:
+    driver: bridge
 
 volumes:
   postgres_data:

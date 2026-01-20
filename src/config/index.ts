@@ -7,12 +7,12 @@ import 'dotenv/config';
 export const config = {
     // Database
     database: {
-        url: process.env.DATABASE_URL || 'postgresql://wash:wash@localhost:5432/wash?schema=public',
+        url: process.env.DATABASE_URL || 'postgresql://wash:wash@localhost:15432/wash?schema=public',
     },
 
     // Redis
     redis: {
-        url: process.env.REDIS_URL || 'redis://localhost:6379',
+        url: process.env.REDIS_URL || 'redis://localhost:16379',
     },
 
     // LLM Configuration

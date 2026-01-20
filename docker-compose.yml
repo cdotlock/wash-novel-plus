@@ -1,5 +1,8 @@
 version: '3.8'
 
+# Development compose - only infrastructure services
+# For full deployment use docker-compose.prod.yml
+
 services:
   postgres:
     image: postgres:16-alpine
@@ -10,7 +13,7 @@ services:
       POSTGRES_PASSWORD: wash
       POSTGRES_DB: wash
     ports:
-      - "54321:5432"
+      - "15432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -24,7 +27,7 @@ services:
     container_name: wash-redis
     restart: unless-stopped
     ports:
-      - "6379:6379"
+      - "16379:6379"
     volumes:
       - redis_data:/data
     command: redis-server --appendonly yes
