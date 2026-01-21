@@ -556,13 +556,6 @@ function normalizePlanningEvents(rawEvents: any[], chapterIndex: ChapterIndex[])
             console.warn(
                 `⚠️ [Planner] Detected gaps in chapter numbering (source text missing chapters): ${rangesText}`,
             );
-
-            await publishEvent(channel, {
-                type: 'thought',
-                message:
-                    `注意：源文本章节编号存在缺失（例如 ${rangesText}），这些章节在原文件中就不存在，因此不会出现在规划结果里。`,
-                data: { missingNumberRanges },
-            });
         }
 
     rawEvents.forEach((raw, idx) => {
