@@ -11,6 +11,8 @@ import { Chapter } from '../schemas/session.js';
 const UploadRequestSchema = z.object({
     content: z.string().min(1),  // Allow shorter content when chapters are pre-parsed
     name: z.string().optional(),
+    // Whether to enable character remapping pipeline for this session
+    remapCharacters: z.boolean().optional(),
     // Optional: pre-parsed chapters (skips auto-parsing when provided)
     chapters: z.array(z.object({
         number: z.number(),
@@ -375,6 +377,10 @@ export async function uploadRoutes(app: FastifyInstance): Promise<void> {
                     // Store as native JSON; Prisma will handle encoding
                     chapters: chaptersRecord,
                     status: 'indexing',
+                    // 初始化会话级的角色改名配置（默认 false）
+                    contentAnalysis: {
+                        remapCharacters: body.remapCharacters ?? false,
+                    },
                 },
             });
 
@@ -399,6 +405,7 @@ export async function uploadRoutes(app: FastifyInstance): Promise<void> {
             content: z.string(),
         })),
         name: z.string().optional(),
+        remapCharacters: z.boolean().optional(),
     });
 
     app.post<{ Params: { id: string } }>(
@@ -447,6 +454,9 @@ export async function uploadRoutes(app: FastifyInstance): Promise<void> {
                     name: body.name ?? session.name,
                     chapters: chaptersRecord,
                     status: 'indexing',
+                    contentAnalysis: {
+                        remapCharacters: body.remapCharacters ?? false,
+                    },
                 },
             });
 
@@ -482,6 +492,9 @@ export async function uploadRoutes(app: FastifyInstance): Promise<void> {
                 // Store as native JSON
                 chapters: chaptersRecord,
                 status: 'indexing',
+                contentAnalysis: {
+                    remapCharacters: body.remapCharacters ?? false,
+                },
             },
         });
 

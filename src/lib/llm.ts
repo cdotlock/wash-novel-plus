@@ -43,7 +43,7 @@ export const MODEL_ROUTER = {
 // Token limits
 export const TOKEN_LIMITS = {
     indexer: 2000,
-    planner: 4000,
+    planner: 8192,  // DeepSeek API max is 8192
     writer: 8192,
     refiner: 4000,
     memory: 1500,

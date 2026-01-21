@@ -23,6 +23,7 @@ export async function processGeneratingJob(job: Job<GeneratingJobData>): Promise
 
     console.log(`\n✍️  [Writer] Starting job for session: ${sessionId.slice(0, 8)}...`);
     console.log(`   Task: ${taskId}, NodeId: ${nodeId ?? 'all'}, Model: ${model ?? getModel(MODEL_ROUTER.writer)}`);
+    console.log(`   RemapCharacters: ${remapCharacters}`);
 
     // Get session data
     const session = await prisma.session.findUnique({
@@ -41,6 +42,13 @@ export async function processGeneratingJob(job: Job<GeneratingJobData>): Promise
         (session as any).characterMap ?? {},
         {},
     );
+
+    // 会话级角色改名开关（由上传/生成阶段写入 contentAnalysis.remapCharacters）
+    const contentAnalysis = parseJsonField<Record<string, any>>(
+        (session as any).contentAnalysis ?? {},
+        {},
+    );
+    const remapCharactersEnabled = !!contentAnalysis.remapCharacters;
 
     // Sliding-window memory context based on MemoryLog (append-only)
     let globalMemory = await getMemoryContext(sessionId);
@@ -176,7 +184,7 @@ export async function processGeneratingJob(job: Job<GeneratingJobData>): Promise
             const cleanedContent = cleanMarkdownCodeBlock(content);
 
             // Optional Stage 1.5: post-processing character renaming
-            const shouldRemap = !!remapCharacters && Object.keys(characterMap || {}).length > 0;
+            const shouldRemap = remapCharactersEnabled && Object.keys(characterMap || {}).length > 0;
             let finalContent = cleanedContent;
 
             if (shouldRemap) {

@@ -100,6 +100,11 @@ export default function App() {
     actual?: number;
     user?: number | null;
   } | null>(null);
+  // 来自 Planner 的「源文本章节编号缺失」信息，用于在规划页顶部展示告警
+  const [missingChapterRanges, setMissingChapterRanges] = useState<{
+    start: number;
+    end: number;
+  }[]>([]);
 
   // Effect to lock node count in 1:1 mode
   useEffect(() => {
@@ -275,6 +280,13 @@ export default function App() {
           if (thoughtsRef.current) {
             thoughtsRef.current.scrollTop = thoughtsRef.current.scrollHeight;
           }
+
+          // 如果 Planner 报告源文本章节编号存在缺失（missingNumberRanges），
+          // 记录下来用于在规划页顶部展示友好提示，帮助用户理解「源文件本身缺章」。
+          const ranges = data.data?.missingNumberRanges as { start: number; end: number }[] | undefined;
+          if (Array.isArray(ranges) && ranges.length > 0) {
+            setMissingChapterRanges(ranges);
+          }
         } else if (data.type === 'node_ready') {
           // Node completed - can view immediately
           const nodeId = data.data?.nodeId;
@@ -289,9 +301,20 @@ export default function App() {
           setGeneratingNodeId(data.data?.nodeId);
           // 不清除思考流，保留上一节点的思考记录
         } else if (data.type === 'progress') {
-          setProgress(data.data?.progress || 0);
+          const prog = data.data?.progress || 0;
+          setProgress(prog);
           setProgressMessage(data.message);
           addLog('progress', data.message);
+
+          // 在规划阶段，如果收到 "Planning complete" 相关的进度提示，
+          // 提前拉一次规划结果，减少「后端已完成但前端还没刷新」的体感延迟。
+          if (
+            step === 'planning' &&
+            typeof data.message === 'string' &&
+            /Planning complete/i.test(data.message)
+          ) {
+            fetchPlanFromServer();
+          }
         } else if (data.type === 'log') {
           addLog('log', data.message);
 
@@ -510,6 +533,8 @@ export default function App() {
             title: f.title,
             content: f.content,
           })),
+          // 将当前的角色改名开关状态作为会话级配置传给后端
+          remapCharacters,
         }),
       });
     } else {
@@ -517,7 +542,10 @@ export default function App() {
       uploadRes = await fetch(`${API_BASE}/api/sessions/${newSessionId}/upload`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ content: files[0].content }),
+        body: JSON.stringify({
+          content: files[0].content,
+          remapCharacters,
+        }),
       });
     }
 
@@ -1158,6 +1186,32 @@ export default function App() {
                   {tr('你指定', 'Your target')}: {planStats.user ?? '—'}
                 </p>
               )}
+
+              {/* 源文本章节编号缺失告警（例如原书本身缺了第 3-4 章） */}
+              {missingChapterRanges.length > 0 && (
+                <div
+                  style={{
+                    marginTop: '0.25rem',
+                    padding: '0.4rem 0.55rem',
+                    borderRadius: '0.4rem',
+                    background: '#fffbeb',
+                    border: '1px solid #f97316',
+                    fontSize: '0.78rem',
+                    color: '#92400e',
+                  }}
+                >
+                  <strong style={{ marginRight: '0.25rem' }}>⚠️ {tr('源文本缺失章节', 'Source chapters missing')}</strong>
+                  {(() => {
+                    const label = missingChapterRanges
+                      .map(r => (r.start === r.end ? `${r.start}` : `${r.start}-${r.end}`))
+                      .join(', ');
+                    return tr(
+                      `原始文件的章节编号存在空洞（例如：${label}），这些章节在源文本中就不存在，因此不会出现在规划结果中。`,
+                      `The source text has gaps in chapter numbering (e.g. ${label}); those chapters do not exist in the original file and will not appear in the plan.`,
+                    );
+                  })()}
+                </div>
+              )}
             </div>
 
             {/* Character map editor */}
@@ -1180,9 +1234,17 @@ export default function App() {
                   {tr('共 ', 'Total ')}{Object.keys(characterMap).length}{tr(' 条', ' mappings')}
                 </span>
               </div>
-              <p style={{ fontSize: '0.8rem', color: 'var(--gray-500)', marginBottom: '0.5rem' }}>
+              <p style={{ fontSize: '0.8rem', color: 'var(--gray-500)', marginBottom: '0.25rem' }}>
                 {tr('索引阶段自动生成的角色改名规则，可在此微调。', 'Auto-generated rename rules from indexing; you can tweak them here.')}
               </p>
+              {!remapCharacters && (
+                <p style={{ fontSize: '0.75rem', color: 'var(--amber-600)', marginBottom: '0.5rem' }}>
+                  {tr(
+                    '当前会话已关闭「角色改名流水线」，即使这里保存了映射，本次生成也不会自动套用，只用于参考/未来会话。',
+                    'Character renaming pipeline is DISABLED for this session. Mappings here are for reference only and will not be applied during generation.',
+                  )}
+                </p>
+              )}
               <div style={{ maxHeight: '190px', overflowY: 'auto', borderRadius: '0.35rem', border: '1px solid var(--gray-200)', padding: '0.5rem', background: 'white' }}>
                 {Object.keys(characterMap).length === 0 ? (
                   <div style={{ fontSize: '0.8rem', color: 'var(--gray-400)' }}>
@@ -1307,15 +1369,47 @@ export default function App() {
 
             {/* Events List */}
             <div className="events-list">
-              {events.map((event) => (
-                <div key={event.id} className={`event-card ${event.type} ${editingEvent === event.id ? 'editing' : ''}`}>
-                  <div className="event-header">
-                    <span className="event-id">#{event.id}</span>
-                    <span className={`event-type ${event.type}`}>
-                      {event.type === 'highlight'
-                        ? tr('🌟 高光', '🌟 Highlight')
-                        : tr('📄 日常', '📄 Normal')}
-                    </span>
+              {events.map((event) => {
+                const isAutoPatched =
+                  typeof event.description === 'string' &&
+                  event.description.includes('Transition segment (auto-patch for uncovered chapters)');
+
+                return (
+                  <div
+                    key={event.id}
+                    className={`event-card ${event.type} ${editingEvent === event.id ? 'editing' : ''} ${
+                      isAutoPatched ? 'auto-patch' : ''
+                    }`}
+                    style={
+                      isAutoPatched
+                        ? {
+                            background: '#fffbeb',
+                            borderColor: '#fed7aa',
+                          }
+                        : undefined
+                    }
+                  >
+                    <div className="event-header">
+                      <span className="event-id">#{event.id}</span>
+                      <span className={`event-type ${event.type}`}>
+                        {event.type === 'highlight'
+                          ? tr('🌟 高光', '🌟 Highlight')
+                          : tr('📄 日常', '📄 Normal')}
+                      </span>
+                      {isAutoPatched && (
+                        <span
+                          style={{
+                            marginLeft: '0.4rem',
+                            fontSize: '0.7rem',
+                            padding: '0.1rem 0.35rem',
+                            borderRadius: '999px',
+                            background: '#f97316',
+                            color: 'white',
+                          }}
+                        >
+                          {tr('自动补丁', 'Auto patch')}
+                        </span>
+                      )}
                     <span className="event-range">
                       {lang === 'en'
                         ? `Ch.${event.startChapter}-${event.endChapter}`
@@ -1345,7 +1439,8 @@ export default function App() {
                     <p className="event-desc">{event.description}</p>
                   )}
                 </div>
-              ))}
+              );
+              })}
             </div>
 
             <div className="planning-actions">

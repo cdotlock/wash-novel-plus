@@ -32,8 +32,17 @@ export async function processIndexingJob(job: Job<IndexingJobData>): Promise<voi
     const chapters = parseJsonField<Record<string, Chapter>>(session.chapters, {});
     const chapterList = Object.values(chapters).sort((a, b) => a.number - b.number);
 
+    // 会话级角色改名总开关（从 contentAnalysis.remapCharacters 读取，默认 true）
+    const contentAnalysisExisting = parseJsonField<Record<string, any>>(
+        (session as any).contentAnalysis ?? {},
+        {},
+    );
+    const remapCharactersEnabled = !!contentAnalysisExisting.remapCharacters;
+
     // Clear previous raw character logs for this session to avoid duplication
-    await prisma.rawCharacterLog.deleteMany({ where: { sessionId } });
+    if (remapCharactersEnabled) {
+        await prisma.rawCharacterLog.deleteMany({ where: { sessionId } });
+    }
     const total = chapterList.length;
 
     // Update task status
@@ -76,22 +85,24 @@ export async function processIndexingJob(job: Job<IndexingJobData>): Promise<voi
                     });
 
                     // Best-effort: extract raw characters for later consolidation
-                    try {
-                        const loose = parseJsonLoose(response);
-                        const rawChars = extractRawCharacters(loose);
-                        if (rawChars.length > 0) {
-                            await prisma.rawCharacterLog.createMany({
-                                data: rawChars.map((c) => ({
-                                    sessionId,
-                                    chapterNumber: chapter.number,
-                                    name: c.name,
-                                    role: c.role ?? null,
-                                    aliases: c.aliases ?? undefined,
-                                })),
-                            });
+                    if (remapCharactersEnabled) {
+                        try {
+                            const loose = parseJsonLoose(response);
+                            const rawChars = extractRawCharacters(loose);
+                            if (rawChars.length > 0) {
+                                await prisma.rawCharacterLog.createMany({
+                                    data: rawChars.map((c) => ({
+                                        sessionId,
+                                        chapterNumber: chapter.number,
+                                        name: c.name,
+                                        role: c.role ?? null,
+                                        aliases: c.aliases ?? undefined,
+                                    })),
+                                });
+                            }
+                        } catch (e) {
+                            console.warn(`[Indexer] Failed to extract raw characters for chapter ${chapter.number}:`, e);
                         }
-                    } catch (e) {
-                        console.warn(`[Indexer] Failed to extract raw characters for chapter ${chapter.number}:`, e);
                     }
 
                     // Parse response
@@ -178,10 +189,12 @@ export async function processIndexingJob(job: Job<IndexingJobData>): Promise<voi
     });
 
     // Build global character map after indexing is done (single LLM call)
-    try {
-        await buildCharacterMapForSession(sessionId, channel);
-    } catch (e) {
-        console.warn(`[Indexer] Failed to build character map for session ${sessionId}:`, e);
+    if (remapCharactersEnabled) {
+        try {
+            await buildCharacterMapForSession(sessionId, channel);
+        } catch (e) {
+            console.warn(`[Indexer] Failed to build character map for session ${sessionId}:`, e);
+        }
     }
 
     // Complete task

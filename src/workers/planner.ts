@@ -17,8 +17,10 @@ export async function processPlanningJob(job: Job<PlanningJobData>): Promise<voi
     const { sessionId, taskId, mode, targetNodeCount, model } = job.data;
     const channel = channels.jobEvents(taskId);
 
-    console.log(`\n📝 [Planner] Starting job for session: ${sessionId.slice(0, 8)}...`);
+    console.log(`\n${'='.repeat(60)}`);
+    console.log(`📝 [Planner] Starting job for session: ${sessionId.slice(0, 8)}...`);
     console.log(`   Mode: ${mode ?? 'auto'}, Target: ${targetNodeCount ?? 'auto'}, Model: ${model ?? getModel(MODEL_ROUTER.planner)}`);
+    console.log(`${'='.repeat(60)}`);
 
     try {
         // Get session data
@@ -38,6 +40,13 @@ export async function processPlanningJob(job: Job<PlanningJobData>): Promise<voi
         const totalChapters = chapterIndex.length;
         const firstChapter = chapterIndex[0].number;
         const lastChapter = chapterIndex[chapterIndex.length - 1].number;
+
+        // DEBUG: Log chapter index details
+        console.log(`\n📊 [Planner DEBUG] Chapter Index Info:`);
+        console.log(`   Total chapters in index: ${totalChapters}`);
+        console.log(`   Chapter range: ${firstChapter} - ${lastChapter}`);
+        console.log(`   First 3 chapters: ${chapterIndex.slice(0, 3).map(c => `${c.number}:${c.title?.slice(0, 20)}`).join(', ')}`);
+        console.log(`   Last 3 chapters: ${chapterIndex.slice(-3).map(c => `${c.number}:${c.title?.slice(0, 20)}`).join(', ')}`);
         const contentAnalysis = parseJsonField<any>(session.contentAnalysis, {});
         const recommendedTarget = typeof contentAnalysis.targetNodeCount === 'number'
             ? contentAnalysis.targetNodeCount
@@ -102,64 +111,264 @@ export async function processPlanningJob(job: Job<PlanningJobData>): Promise<voi
 
             rationale = 'One-to-one mapping requested by user.';
         } else {
-            // AI Planning Modes (Auto, Split, Merge)
+            // AI Planning Modes (Auto, Split, Merge) with batch processing and robust retry
 
-            // Generate planning prompt via Langfuse
-            const prompt = await getPlanningPrompt({
-                mode: resolvedMode,
-                chapterSummaries,
-                // 如果用户没有填，就把索引阶段推荐的节点数传给提示，以提高稳定性
-                targetNodeCount: effectiveTargetNodeCount,
-                customInstructions: (job.data as any).customInstructions,
-                language: config.novelLanguage as 'cn' | 'en',
-            });
+            const CHAPTERS_PER_BATCH = 50;
+            const MIN_BATCH_SIZE = 10; // Don't split smaller than this
 
+            // Helper: Split array into chunks
+            function chunkArray<T>(arr: T[], size: number): T[][] {
+                const chunks: T[][] = [];
+                for (let i = 0; i < arr.length; i += size) {
+                    chunks.push(arr.slice(i, i + size));
+                }
+                return chunks;
+            }
+
+            // Helper: Find chapters in index that are not covered by events
+            function findMissingChapters(events: EventPlan[], chapters: ChapterIndex[]): number[] {
+                const coveredChapters = new Set<number>();
+                events.forEach(e => {
+                    for (let i = e.startChapter; i <= e.endChapter; i++) {
+                        coveredChapters.add(i);
+                    }
+                });
+                return chapters.map(c => c.number).filter(n => !coveredChapters.has(n));
+            }
+
+            // Recursive planner with auto-split
+            async function planBatchRecursive(
+                batchChapters: ChapterIndex[],
+                depth: number = 0,
+            ): Promise<EventPlan[]> {
+                const batchFirstChapter = batchChapters[0].number;
+                const batchLastChapter = batchChapters[batchChapters.length - 1].number;
+                const indent = '  '.repeat(depth);
+
+                console.log(`${indent}📦 [Planner] Planning chapters ${batchFirstChapter}-${batchLastChapter} (${batchChapters.length} chapters)`);
+
+                // Calculate proportional target node count
+                const batchTargetNodes = Math.max(1, Math.round(effectiveTargetNodeCount * (batchChapters.length / totalChapters)));
+
+                // Build chapter summaries
+                const batchSummaries = batchChapters
+                    .map((c) => `Chapter ${c.number}: ${c.title}\n  Summary: ${c.summary}\n  Type: ${c.type}\n  Key Event: ${c.keyEvent}`)
+                    .join('\n\n');
+
+                await publishEvent(channel, {
+                    type: 'thought',
+                    message: `Analyzing chapters ${batchFirstChapter}-${batchLastChapter} (${batchChapters.length} chapters, target ${batchTargetNodes} nodes)...`,
+                });
+
+                try {
+                    // Generate prompt and call LLM
+                    const prompt = await getPlanningPrompt({
+                        mode: resolvedMode as 'auto' | 'split' | 'merge',
+                        chapterSummaries: batchSummaries,
+                        targetNodeCount: batchTargetNodes,
+                        customInstructions: (job.data as any).customInstructions,
+                        language: config.novelLanguage as 'cn' | 'en',
+                    });
+
+                    const response = await chatWithRetry(prompt, {
+                        model: resolvedModel,
+                        maxTokens: TOKEN_LIMITS.planner,
+                    });
+
+                    console.log(`${indent}📥 Response: ${response.length} chars`);
+
+                    // Try to parse
+                    let extracted: { events: any[]; rationale?: string } | null = null;
+                    try {
+                        const parsed = parseJsonLoose(response);
+                        extracted = extractPlanningEvents(parsed);
+                    } catch (parseError) {
+                        console.warn(`${indent}   Parse failed, trying repair...`);
+                        extracted = await repairPlanningResponse(response, resolvedModel);
+                    }
+
+                    if (!extracted || !Array.isArray(extracted.events) || extracted.events.length === 0) {
+                        throw new Error('No events parsed');
+                    }
+
+                    // Normalize and check coverage
+                    const batchEvents = normalizePlanningEvents(extracted.events, batchChapters);
+                    const missingChapters = findMissingChapters(batchEvents, batchChapters);
+
+                    console.log(`${indent}📋 Got ${batchEvents.length} events, ${missingChapters.length} missing`);
+
+                    // If coverage is good enough, return
+                    // 允许少量未覆盖（≤ 20%），其余情况交给递归拆分或后续补丁逻辑处理，避免无限重试。
+                    if (missingChapters.length <= batchChapters.length * 0.2) {
+                        await publishEvent(channel, {
+                            type: 'thought',
+                            message: `Chapters ${batchFirstChapter}-${batchLastChapter}: ${batchEvents.length} events ✓`,
+                        });
+                        return batchEvents;
+                    }
+
+                    // Too many missing - need to split if possible
+                    throw new Error(`Too many missing chapters: ${missingChapters.length}`);
+
+                } catch (error) {
+                    // Can we split further?
+                    if (batchChapters.length > MIN_BATCH_SIZE) {
+                        const halfSize = Math.ceil(batchChapters.length / 2);
+                        console.log(`${indent}⚠️ Splitting into 2 sub-batches of ~${halfSize} chapters...`);
+
+                        await publishEvent(channel, {
+                            type: 'thought',
+                            message: `Splitting chapters ${batchFirstChapter}-${batchLastChapter} into smaller batches...`,
+                        });
+
+                        const subBatches = chunkArray(batchChapters, halfSize);
+                        const subResults = await Promise.all(
+                            subBatches.map(sub => planBatchRecursive(sub, depth + 1))
+                        );
+                        return subResults.flat();
+                    } else {
+                        // Can't split further, throw
+                        console.error(`${indent}❌ Cannot split further, batch too small`);
+                        throw error;
+                    }
+                }
+            }
+
+            // Main planning logic - use recursive planner with auto-split
             await publishEvent(channel, {
                 type: 'thought',
-                message: 'Analyzing chapter structure and designing event nodes...',
+                message: `Planning ${totalChapters} chapters...`,
             });
 
-            // Call LLM
-            const response = await chatWithRetry(prompt, {
-                model: resolvedModel,
-                maxTokens: TOKEN_LIMITS.planner,
-            });
+            // Start with initial batches, each will auto-split if needed
+            if (totalChapters <= CHAPTERS_PER_BATCH) {
+                // Single batch
+                events = await planBatchRecursive(chapterIndex, 0);
+                rationale = '';
+            } else {
+                // Multiple batches - process concurrently
+                const batches = chunkArray(chapterIndex, CHAPTERS_PER_BATCH);
+                console.log(`\n📦 [Planner] Splitting ${totalChapters} chapters into ${batches.length} batches...`);
+
+                await publishEvent(channel, {
+                    type: 'progress',
+                    message: `Planning ${batches.length} batches concurrently...`,
+                    data: { progress: 10 },
+                });
+
+                // Run all batches in parallel - each auto-splits if needed
+                const batchResults = await Promise.all(
+                    batches.map(batch => planBatchRecursive(batch, 0))
+                );
+
+                // Merge and re-number all events
+                events = batchResults
+                    .flat()
+                    .sort((a, b) => a.startChapter - b.startChapter)
+                    .map((e, idx) => ({ ...e, id: idx + 1 }));
+                rationale = '';
+
+                console.log(`\n✅ [Planner] All batches completed. Total events: ${events.length}`);
+            }
+
+            // Final validation + 补丁：对「真实存在但未被任何事件覆盖」的章节进行自动补全，并提示用户。
+            const beforePatchMissing = findMissingChapters(events, chapterIndex);
+            if (beforePatchMissing.length > 0) {
+                console.warn(
+                    `⚠️ [Planner] Detected ${beforePatchMissing.length} uncovered chapters before patch: ${beforePatchMissing.join(', ')}`,
+                );
+                await publishEvent(channel, {
+                    type: 'thought',
+                    message:
+                        `检测到未被任何事件覆盖的章节：${beforePatchMissing.join(
+                            ', ',
+                        )}，将自动生成普通过渡事件（Transition segment），建议后续人工检查。`,
+                    data: { missingChapters: beforePatchMissing },
+                });
+
+                // 针对缺失章节编号（这些编号一定来自 chapterIndex，而非「章节号数字上的空洞」），
+                // 按连续区间补出若干普通事件，避免引用不存在的章节内容。
+                const sortedMissing = [...beforePatchMissing].sort((a, b) => a - b);
+                const patchEvents: EventPlan[] = [];
+
+                let rangeStart = sortedMissing[0];
+                let prev = sortedMissing[0];
+                for (let i = 1; i < sortedMissing.length; i++) {
+                    const curr = sortedMissing[i];
+                    if (curr === prev + 1) {
+                        prev = curr;
+                        continue;
+                    }
+                    patchEvents.push({
+                        id: 0, // 先占位，稍后整体重新编号
+                        type: 'normal',
+                        startChapter: rangeStart,
+                        endChapter: prev,
+                        description: 'Transition segment (auto-patch for uncovered chapters)',
+                        sceneCount: 1,
+                    });
+                    rangeStart = curr;
+                    prev = curr;
+                }
+                // 最后一段
+                patchEvents.push({
+                    id: 0,
+                    type: 'normal',
+                    startChapter: rangeStart,
+                    endChapter: prev,
+                    description: 'Transition segment (auto-patch for uncovered chapters)',
+                    sceneCount: 1,
+                });
+
+                // 合并补丁事件并整体按章节排序、重新编号
+                events = [...events, ...patchEvents]
+                    .sort((a, b) => a.startChapter - b.startChapter)
+                    .map((e, idx) => ({ ...e, id: idx + 1 }));
+            }
+
+            const finalMissing = findMissingChapters(events, chapterIndex);
+            if (finalMissing.length > 0) {
+                console.warn(`⚠️ [Planner] Final: ${finalMissing.length} chapters not fully covered after patch`);
+                await publishEvent(channel, {
+                    type: 'thought',
+                    message: `警告：即使自动补全后，仍有 ${finalMissing.length} 章可能未被覆盖：${finalMissing.join(', ')}`,
+                    data: { missingChapters: finalMissing },
+                });
+            } else {
+                console.log(`✅ [Planner] All ${totalChapters} chapters covered by ${events.length} events (after patch if needed)`);
+            }
 
             await publishEvent(channel, {
                 type: 'progress',
-                message: 'Parsing planning response...',
-                data: { progress: 50 },
+                message: `Planning complete: ${events.length} events generated`,
+                data: { progress: 90 },
             });
-
-            // Primary path: loose JSON parse + heuristic extraction
-            try {
-                const parsed = parseJsonLoose(response);
-                const extracted = extractPlanningEvents(parsed);
-
-                if (!extracted || !Array.isArray(extracted.events)) {
-                    throw new Error('No events found in planning response');
-                }
-
-                events = normalizePlanningEvents(extracted.events, chapterIndex);
-                rationale = extracted.rationale ?? '';
-            } catch (primaryError) {
-                // Attempt more aggressive repair before giving up
-                const repaired = await repairPlanningResponse(response, resolvedModel);
-
-                if (!repaired || !Array.isArray(repaired.events) || repaired.events.length === 0) {
-                    console.error('Failed to parse planning response after repair attempts:', primaryError);
-                    throw new Error('Failed to parse planning response after repair attempts');
-                }
-
-                events = normalizePlanningEvents(repaired.events, chapterIndex);
-                rationale = repaired.rationale ?? '';
-            }
-
-            // NOTE: We intentionally no longer perform automatic post-processing
-            // like merging consecutive highlights or auto-filling chapter gaps.
-            // The LLM prompt is responsible for producing a topology that matches
-            // the user's expectations, and users can edit ranges directly in the UI.
         }
+
+        // DEBUG: Final summary before saving
+        console.log(`\n${'='.repeat(60)}`);
+        console.log(`📊 [Planner DEBUG] FINAL SUMMARY:`);
+        console.log(`   Input chapters: ${totalChapters} (range: ${firstChapter}-${lastChapter})`);
+        console.log(`   Output events: ${events.length}`);
+        if (events.length > 0) {
+            const coveredChapters = new Set<number>();
+            events.forEach(e => {
+                for (let i = e.startChapter; i <= e.endChapter; i++) coveredChapters.add(i);
+            });
+            console.log(`   Chapters covered by final events: ${coveredChapters.size}`);
+            console.log(`   Coverage range: ${Math.min(...coveredChapters)}-${Math.max(...coveredChapters)}`);
+
+            const missingFinal: number[] = [];
+            for (let i = firstChapter; i <= lastChapter; i++) {
+                if (!coveredChapters.has(i)) missingFinal.push(i);
+            }
+            if (missingFinal.length > 0) {
+                console.warn(`   ⚠️ FINAL MISSING CHAPTERS: ${missingFinal.join(', ')}`);
+            } else {
+                console.log(`   ✅ All chapters covered in final output!`);
+            }
+        }
+        console.log(`${'='.repeat(60)}\n`);
 
         // Merge simple stats into contentAnalysis so frontend can display them
         const updatedAnalysis = {
@@ -319,8 +528,42 @@ function extractPlanningEvents(parsed: any): { events: any[]; rationale?: string
 function normalizePlanningEvents(rawEvents: any[], chapterIndex: ChapterIndex[]): EventPlan[] {
     const events: EventPlan[] = [];
 
-    const firstChapter = chapterIndex[0]?.number ?? 1;
-    const lastChapter = chapterIndex[chapterIndex.length - 1]?.number ?? firstChapter;
+        const firstChapter = chapterIndex[0]?.number ?? 1;
+        const lastChapter = chapterIndex[chapterIndex.length - 1]?.number ?? firstChapter;
+
+        // 记录真实存在的章节编号（有的小说文本本身会缺失部分章节号，需要与「数字连续性」区分开来）
+        const chapterNumbers = chapterIndex
+            .map((c) => c.number)
+            .filter((n) => Number.isFinite(n))
+            .sort((a, b) => a - b);
+
+        // 检测源文本中的「章节号缺失」，例如有 1,2,5,6 但没有 3,4 —— 这种情况不算规划缺失，
+        // 只是源数据本身不完整，需要单独向前端/用户提示。
+        const missingNumberRanges: Array<{ start: number; end: number }> = [];
+        for (let i = 1; i < chapterNumbers.length; i++) {
+            const prev = chapterNumbers[i - 1];
+            const curr = chapterNumbers[i];
+            if (curr > prev + 1) {
+                missingNumberRanges.push({ start: prev + 1, end: curr - 1 });
+            }
+        }
+
+        if (missingNumberRanges.length > 0) {
+            const rangesText = missingNumberRanges
+                .map((r) => (r.start === r.end ? `${r.start}` : `${r.start}-${r.end}`))
+                .join(', ');
+
+            console.warn(
+                `⚠️ [Planner] Detected gaps in chapter numbering (source text missing chapters): ${rangesText}`,
+            );
+
+            await publishEvent(channel, {
+                type: 'thought',
+                message:
+                    `注意：源文本章节编号存在缺失（例如 ${rangesText}），这些章节在原文件中就不存在，因此不会出现在规划结果里。`,
+                data: { missingNumberRanges },
+            });
+        }
 
     rawEvents.forEach((raw, idx) => {
         if (!raw || typeof raw !== 'object') return;
